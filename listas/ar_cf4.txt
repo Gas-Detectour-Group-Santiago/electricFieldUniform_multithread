@@ -1,0 +1,224 @@
+      Ar
+        Level 0:  ELASTIC ANISOTROPIC       ARGON                  
+          Type 0 (elastic)
+        Level 1:  IONISATION CHARGE STATE =1      ELOSS=   15.75961
+          Type 1 (ionisation). Ionisation threshold: 15.7596 eV.
+        Level 2:  IONISATION CHARGE STATE =2      ELOSS=   43.38928
+          Type 1 (ionisation). Ionisation threshold: 43.3893 eV.
+        Level 3:  IONISATION CHARGE STATE =3      ELOSS=   84.124  
+          Type 1 (ionisation). Ionisation threshold: 84.124 eV.
+        Level 4:  IONISATION L3 SHELL             ELOSS=  248.4    
+          Type 1 (ionisation). Ionisation threshold: 248.4 eV.
+        Level 5:  IONISATION L2 SHELL             ELOSS=  250.6    
+          Type 1 (ionisation). Ionisation threshold: 250.6 eV.
+        Level 6:  IONISATION L1 SHELL             ELOSS=  326.3    
+          Type 1 (ionisation). Ionisation threshold: 326.3 eV.
+        Level 7:  ATTACHMENT                                       
+          Type 2 (attachment)
+        Level 8:  EXC 1S5    J=2 METASTABLE         ELEVEL= 11.548 
+          Type 4 (excitation). Excitation energy: 11.548 eV.
+        Level 9:  EXC 1S4    J=1 RESONANT           ELEVEL= 11.624 
+          Type 4 (excitation). Excitation energy: 11.624 eV.
+        Level 10:  EXC 1S3    J=0 METASTABLE         ELEVEL= 11.723 
+          Type 4 (excitation). Excitation energy: 11.723 eV.
+        Level 11:  EXC 1S2    J=1 RESONANT           ELEVEL= 11.828 
+          Type 4 (excitation). Excitation energy: 11.828 eV.
+        Level 12:  EXC 2P10   J=1                    ELEVEL= 12.907 
+          Type 4 (excitation). Excitation energy: 12.907 eV.
+        Level 13:  EXC 2P9    J=3                    ELEVEL= 13.076 
+          Type 4 (excitation). Excitation energy: 13.076 eV.
+        Level 14:  EXC 2P8    J=2                    ELEVEL= 13.095 
+          Type 4 (excitation). Excitation energy: 13.095 eV.
+        Level 15:  EXC 2P7    J=1                    ELEVEL= 13.153 
+          Type 4 (excitation). Excitation energy: 13.153 eV.
+        Level 16:  EXC 2P6    J=2                    ELEVEL= 13.172 
+          Type 4 (excitation). Excitation energy: 13.172 eV.
+        Level 17:  EXC 2P5    J=0                    ELEVEL= 13.273 
+          Type 4 (excitation). Excitation energy: 13.273 eV.
+        Level 18:  EXC 2P4    J=1                    ELEVEL= 13.283 
+          Type 4 (excitation). Excitation energy: 13.283 eV.
+        Level 19:  EXC 2P3    J=2                    ELEVEL= 13.302 
+          Type 4 (excitation). Excitation energy: 13.302 eV.
+        Level 20:  EXC 2P2    J=1                    ELEVEL= 13.328 
+          Type 4 (excitation). Excitation energy: 13.328 eV.
+        Level 21:  EXC 2P1    J=0                    ELEVEL= 13.480 
+          Type 4 (excitation). Excitation energy: 13.48 eV.
+        Level 22:  EXC 3D6    J=0                    ELEVEL= 13.845 
+          Type 4 (excitation). Excitation energy: 13.845 eV.
+        Level 23:  EXC 3D5    J=1 RESONANT           ELEVEL= 13.864 
+          Type 4 (excitation). Excitation energy: 13.864 eV.
+        Level 24:  EXC 3D3    J=2                    ELEVEL= 13.903 
+          Type 4 (excitation). Excitation energy: 13.903 eV.
+        Level 25:  EXC 3D4!   J=4                    ELEVEL= 13.979 
+          Type 4 (excitation). Excitation energy: 13.979 eV.
+        Level 26:  EXC 3D4    J=3                    ELEVEL= 14.013 
+          Type 4 (excitation). Excitation energy: 14.013 eV.
+        Level 27:  EXC 3D1!!  J=2                    ELEVEL= 14.063 
+          Type 4 (excitation). Excitation energy: 14.063 eV.
+        Level 28:  EXC 2S5    J=2                    ELEVEL= 14.068 
+          Type 4 (excitation). Excitation energy: 14.068 eV.
+        Level 29:  EXC 2S4    J=1 RESONANT           ELEVEL= 14.090 
+          Type 4 (excitation). Excitation energy: 14.09 eV.
+        Level 30:  EXC 3D1!   J=3                    ELEVEL= 14.099 
+          Type 4 (excitation). Excitation energy: 14.099 eV.
+        Level 31:  EXC 3D2    J=1 RESONANT           ELEVEL= 14.153 
+          Type 4 (excitation). Excitation energy: 14.153 eV.
+        Level 32:  EXC 3S1!!!!J=2                    ELEVEL= 14.214 
+          Type 4 (excitation). Excitation energy: 14.214 eV.
+        Level 33:  EXC 3S1!!  J=2                    ELEVEL= 14.234 
+          Type 4 (excitation). Excitation energy: 14.234 eV.
+        Level 34:  EXC 3S1!!! J=3                    ELEVEL= 14.236 
+          Type 4 (excitation). Excitation energy: 14.236 eV.
+        Level 35:  EXC 2S3    J=0                    ELEVEL= 14.241 
+          Type 4 (excitation). Excitation energy: 14.241 eV.
+        Level 36:  EXC 2S2    J=1 RESONANT           ELEVEL= 14.255 
+          Type 4 (excitation). Excitation energy: 14.255 eV.
+        Level 37:  EXC 3S1!   J=1 RESONANT           ELEVEL= 14.304 
+          Type 4 (excitation). Excitation energy: 14.304 eV.
+        Level 38:  EXC 4D5    J=1 RESONANT           ELEVEL= 14.711 
+          Type 4 (excitation). Excitation energy: 14.711 eV.
+        Level 39:  EXC 3S4    J=1 RESONANT           ELEVEL= 14.848 
+          Type 4 (excitation). Excitation energy: 14.848 eV.
+        Level 40:  EXC 4D2    J=1 RESONANT           ELEVEL= 14.859 
+          Type 4 (excitation). Excitation energy: 14.859 eV.
+        Level 41:  EXC 4S1!   J=1 RESONANT           ELEVEL= 15.004 
+          Type 4 (excitation). Excitation energy: 15.004 eV.
+        Level 42:  EXC 3S2    J=1 RESONANT           ELEVEL= 15.022 
+          Type 4 (excitation). Excitation energy: 15.022 eV.
+        Level 43:  EXC 5D5    J=1 RESONANT           ELEVEL= 15.118 
+          Type 4 (excitation). Excitation energy: 15.118 eV.
+        Level 44:  EXC 4S4    J=1 RESONANT           ELEVEL= 15.186 
+          Type 4 (excitation). Excitation energy: 15.186 eV.
+        Level 45:  EXC 5D2    J=1 RESONANT           ELEVEL= 15.190 
+          Type 4 (excitation). Excitation energy: 15.19 eV.
+        Level 46:  EXC 6D5    J=1 RESONANT           ELEVEL= 15.308 
+          Type 4 (excitation). Excitation energy: 15.308 eV.
+        Level 47:  EXC 5S1!   J=1 RESONANT           ELEVEL= 15.351 
+          Type 4 (excitation). Excitation energy: 15.351 eV.
+        Level 48:  EXC 4S2    J=1 RESONANT           ELEVEL= 15.360 
+          Type 4 (excitation). Excitation energy: 15.36 eV.
+        Level 49:  EXC 5S4    J=1 RESONANT           ELEVEL= 15.366 
+          Type 4 (excitation). Excitation energy: 15.366 eV.
+        Level 50:  EXC 6D2    J=1 RESONANT           ELEVEL= 15.374 
+          Type 4 (excitation). Excitation energy: 15.374 eV.
+        Level 51:  EXC HIGH   J=1 RESONANT           ELEVEL= 15.660 
+          Type 4 (excitation). Excitation energy: 15.66 eV.
+      CF4
+        Level 52:  ELASTIC  ANISOTROPIC            CF4              
+          Type 0 (elastic)
+        Level 53:  ION  CF3 +                      ELOSS=   15.70   
+          Type 1 (ionisation). Ionisation threshold: 15.7 eV.
+        Level 54:  ION  CF2 +                      ELOSS=   21.47   
+          Type 1 (ionisation). Ionisation threshold: 21.47 eV.
+        Level 55:  ION  CF +                       ELOSS=   29.14   
+          Type 1 (ionisation). Ionisation threshold: 29.14 eV.
+        Level 56:  ION  F +                        ELOSS=   34.5    
+          Type 1 (ionisation). Ionisation threshold: 34.5 eV.
+        Level 57:  ION  C +                        ELOSS=   34.77   
+          Type 1 (ionisation). Ionisation threshold: 34.77 eV.
+        Level 58:  DOUBLE ION    CF3 + , F +       ELOSS=   36.0    
+          Type 1 (ionisation). Ionisation threshold: 36 eV.
+        Level 59:  DOUBLE ION    CF2 + , F +       ELOSS=   40.0    
+          Type 1 (ionisation). Ionisation threshold: 40 eV.
+        Level 60:  IONS  CF3 ++ OR CF2 ++          ELOSS=   41.0    
+          Type 1 (ionisation). Ionisation threshold: 41 eV.
+        Level 61:  DOUBLE ION    CF +  , F +       ELOSS=   43.0    
+          Type 1 (ionisation). Ionisation threshold: 43 eV.
+        Level 62:  DOUBLE ION    C  +  , F +       ELOSS=   63.0    
+          Type 1 (ionisation). Ionisation threshold: 63 eV.
+        Level 63:  IONISATION   CARBON K-SHELL     ELOSS=  285.0    
+          Type 1 (ionisation). Ionisation threshold: 285 eV.
+        Level 64:  ATTACHMENT                                       
+          Type 2 (attachment)
+        Level 65:  VIB  V2           ANISOTROPIC   ELOSS=   -0.0539 
+          Type 5 (super-elastic). Energy gain: 0.0539 eV.
+        Level 66:  VIB  V2           ANISOTROPIC   ELOSS=    0.0539 
+          Type 3 (inelastic). Energy loss: 0.0539 eV.
+        Level 67:  VIB  V4           ANISOTROPIC   ELOSS=   -0.0783 
+          Type 5 (super-elastic). Energy gain: 0.0783 eV.
+        Level 68:  VIB  V4           ANISOTROPIC   ELOSS=    0.0783 
+          Type 3 (inelastic). Energy loss: 0.0783 eV.
+        Level 69:  VIB  V1           ANISOTROPIC   ELOSS=   -0.1126 
+          Type 5 (super-elastic). Energy gain: 0.1126 eV.
+        Level 70:  VIB  V1           ANISOTROPIC   ELOSS=    0.1126 
+          Type 3 (inelastic). Energy loss: 0.1126 eV.
+        Level 71:  VIB  V3           ANISOTROPIC   ELOSS=   -0.1588 
+          Type 5 (super-elastic). Energy gain: 0.1588 eV.
+        Level 72:  VIB  V3           ANISOTROPIC   ELOSS=    0.1588 
+          Type 3 (inelastic). Energy loss: 0.1588 eV.
+        Level 73:  VIB 2V3           ANISOTROPIC   ELOSS=    0.3176 
+          Type 3 (inelastic). Energy loss: 0.3176 eV.
+        Level 74:  VIB HARMONIC      ANISOTROPIC   ELOSS=    0.4764 
+          Type 3 (inelastic). Energy loss: 0.4764 eV.
+        Level 75:  NEUTRAL DISS      NON-DIPOLE    ELOSS=   11.5    
+          Type 3 (inelastic). Energy loss: 11.5 eV.
+        Level 76:  NEUTRAL DISS DIPOLE F=0.000189  ELOSS=   11.63   
+          Type 3 (inelastic). Energy loss: 11.63 eV.
+        Level 77:  NEUTRAL DISS DIPOLE F=0.001085  ELOSS=   11.88   
+          Type 3 (inelastic). Energy loss: 11.88 eV.
+        Level 78:  NEUTRAL DISS DIPOLE F=0.004807  ELOSS=   12.13   
+          Type 3 (inelastic). Energy loss: 12.13 eV.
+        Level 79:  NEUTRAL DISS DIPOLE F=0.008819  ELOSS=   12.38   
+          Type 3 (inelastic). Energy loss: 12.38 eV.
+        Level 80:  NEUTRAL DISS      NON-DIPOLE    ELOSS=   12.50   
+          Type 3 (inelastic). Energy loss: 12.5 eV.
+        Level 81:  NEUTRAL DISS DIPOLE F=0.008918  ELOSS=   12.63   
+          Type 3 (inelastic). Energy loss: 12.63 eV.
+        Level 82:  NEUTRAL DISS DIPOLE F=0.008420  ELOSS=   12.88   
+          Type 3 (inelastic). Energy loss: 12.88 eV.
+        Level 83:  NEUTRAL DISS DIPOLE F=0.02531   ELOSS=   13.13   
+          Type 3 (inelastic). Energy loss: 13.13 eV.
+        Level 84:  NEUTRAL DISS DIPOLE F=0.09553   ELOSS=   13.38   
+          Type 3 (inelastic). Energy loss: 13.38 eV.
+        Level 85:  NEUTRAL DISS DIPOLE F=0.11193   ELOSS=   13.63   
+          Type 3 (inelastic). Energy loss: 13.63 eV.
+        Level 86:  NEUTRAL DISS DIPOLE F=0.10103   ELOSS=   13.88   
+          Type 3 (inelastic). Energy loss: 13.88 eV.
+        Level 87:  NEUTRAL DISS      NON-DIPOLE    ELOSS=   14.00   
+          Type 3 (inelastic). Energy loss: 14 eV.
+        Level 88:  NEUTRAL DISS DIPOLE F=0.06902   ELOSS=   14.13   
+          Type 3 (inelastic). Energy loss: 14.13 eV.
+        Level 89:  NEUTRAL DISS DIPOLE F=0.03968   ELOSS=   14.38   
+          Type 3 (inelastic). Energy loss: 14.38 eV.
+        Level 90:  NEUTRAL DISS DIPOLE F=0.02584   ELOSS=   14.63   
+          Type 3 (inelastic). Energy loss: 14.63 eV.
+        Level 91:  NEUTRAL DISS DIPOLE F=0.02071   ELOSS=   14.88   
+          Type 3 (inelastic). Energy loss: 14.88 eV.
+        Level 92:  NEUTRAL DISS DIPOLE F=0.03122   ELOSS=   15.13   
+          Type 3 (inelastic). Energy loss: 15.13 eV.
+        Level 93:  NEUTRAL DISS DIPOLE F=0.05580   ELOSS=   15.38   
+          Type 3 (inelastic). Energy loss: 15.38 eV.
+        Level 94:  NEUTRAL DISS DIPOLE F=0.10187   ELOSS=   15.63   
+          Type 3 (inelastic). Energy loss: 15.63 eV.
+        Level 95:  NEUTRAL DISS DIPOLE F=0.09427   ELOSS=   15.88   
+          Type 3 (inelastic). Energy loss: 15.88 eV.
+        Level 96:  NEUTRAL DISS DIPOLE F=0.05853   ELOSS=   16.13   
+          Type 3 (inelastic). Energy loss: 16.13 eV.
+        Level 97:  NEUTRAL DISS DIPOLE F=0.06002   ELOSS=   16.38   
+          Type 3 (inelastic). Energy loss: 16.38 eV.
+        Level 98:  NEUTRAL DISS DIPOLE F=0.05647   ELOSS=   16.63   
+          Type 3 (inelastic). Energy loss: 16.63 eV.
+        Level 99:  NEUTRAL DISS DIPOLE F=0.04885   ELOSS=   16.88   
+          Type 3 (inelastic). Energy loss: 16.88 eV.
+        Level 100:  NEUTRAL DISS DIPOLE F=0.04036   ELOSS=   17.13   
+          Type 3 (inelastic). Energy loss: 17.13 eV.
+        Level 101:  NEUTRAL DISS DIPOLE F=0.03298   ELOSS=   17.38   
+          Type 3 (inelastic). Energy loss: 17.38 eV.
+        Level 102:  NEUTRAL DISS DIPOLE F=0.02593   ELOSS=   17.63   
+          Type 3 (inelastic). Energy loss: 17.63 eV.
+        Level 103:  NEUTRAL DISS DIPOLE F=0.01802   ELOSS=   17.88   
+          Type 3 (inelastic). Energy loss: 17.88 eV.
+        Level 104:  NEUTRAL DISS DIPOLE F=0.01287   ELOSS=   18.13   
+          Type 3 (inelastic). Energy loss: 18.13 eV.
+        Level 105:  NEUTRAL DISS DIPOLE F=0.00830   ELOSS=   18.38   
+          Type 3 (inelastic). Energy loss: 18.38 eV.
+        Level 106:  NEUTRAL DISS DIPOLE F=0.00698   ELOSS=   18.63   
+          Type 3 (inelastic). Energy loss: 18.63 eV.
+        Level 107:  NEUTRAL DISS DIPOLE F=0.00581   ELOSS=   18.88   
+          Type 3 (inelastic). Energy loss: 18.88 eV.
+        Level 108:  NEUTRAL DISS DIPOLE F=0.00502   ELOSS=   19.13   
+          Type 3 (inelastic). Energy loss: 19.13 eV.
+        Level 109:  NEUTRAL DISS DIPOLE F=0.00398   ELOSS=   19.38   
+          Type 3 (inelastic). Energy loss: 19.38 eV.
+        Level 110:  NEUTRAL DISS DIPOLE F=0.00189   ELOSS=   19.63   
+          Type 3 (inelastic). Energy loss: 19.63 eV.
