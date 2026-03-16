@@ -37,8 +37,8 @@ n = 3
 ######################################################################
 # Parametros de la simulación
 
-
-is_isotropic = True             # Decide si corres la simulación isotrópicamente o no
+# Decide si corres la simulación isotrópicamente o no
+is_isotropic = True
 
 npe       = [1]*3                 # e- primarios
 

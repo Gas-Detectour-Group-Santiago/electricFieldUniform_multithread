@@ -57,7 +57,7 @@ int main(int argc, char *argv[]){
 
 	if (argc<10){
 		cout<<"Wrong number of arguments."<<endl;
-		cout<<"./fatGem rootFileName.root fieldE(V/cm) pitch(mm) pressure(bar) npe(#) gas1() mixture(%) gas2() mixture(%) height(%)"<<endl;
+		cout<<"./fatGem rootFileName.root fieldE(V/cm) pitch(mm) pressure(bar) npe(#) gas1() mixture(%) gas2() mixture(%) height(0.9 to 0.999)"<<endl;
 		exit(EXIT_FAILURE);
 	}
 
@@ -111,7 +111,7 @@ int main(int argc, char *argv[]){
 	TString _height_string=argv[10];
 	double_t _height = _height_string.Atof();
 	const double height = double(_height); 
-
+	
 	///////////////////////////////////////////////////////////////////////////////////
 	///////////////////////////////////////////////////////////////////////////////////
 	// Inicializamos el tiempo
@@ -299,10 +299,10 @@ int main(int argc, char *argv[]){
 	bool flag = true;
 
 	// IMPORTANTE Y CRÍTICO. CAMBIAR ENTRE EL DE ARRIBA Y EL DE ABAJO SI NO FUNCIONA. LINEA 347 TMB
-	//std::size_t nElastic= 0, nIonising= 0, nAttachment= 0, nInelastic= 0, nExcitation= 0, nSuperelastic = 0;
+	std::size_t nElastic= 0, nIonising= 0, nAttachment= 0, nInelastic= 0, nExcitation= 0, nSuperelastic = 0;
 	
-	unsigned int nElastic = 0, nIonising = 0, nAttachment = 0;
-	unsigned int nInelastic = 0, nExcitation = 0, nSuperelastic = 0;
+	//unsigned int nElastic = 0, nIonising = 0, nAttachment = 0;
+	//unsigned int nInelastic = 0, nExcitation = 0, nSuperelastic = 0;
 	
 
 	for (eventNumber = 0; eventNumber < npe; eventNumber++)
@@ -313,6 +313,10 @@ int main(int argc, char *argv[]){
 		// Distancias en cm; aleatorio para no tener siempre los mismos datos
 		x0 = gRandom->Uniform(-pitch, pitch);
 		y0 = gRandom->Uniform(-pitch, pitch);
+
+		
+		theta0 = gRandom->Uniform(0, 2 * TMath::Pi());
+		phi0 = gRandom->Uniform(TMath::Pi()/2,TMath::Pi());
 
 		// Emitimos el electrón en la parte de arriba
 		z0 =  pitch*height;	
@@ -328,7 +332,7 @@ int main(int argc, char *argv[]){
 
 	
 
-		aval->AvalancheElectron (x0, y0, z0, t0, e0, 0., 0., 0.);
+		aval->AvalancheElectron (x0, y0, z0, t0, e0, TMath::Cos(phi0)*TMath::Sin(theta0),  TMath::Sin(phi0)*TMath::Sin(theta0),  TMath::Cos(theta0));
 
 
 		//std::cout << eventNumber + 1 << " finished " << npe << endl;
@@ -350,12 +354,12 @@ int main(int argc, char *argv[]){
 			
 			
 			// IMPORTANTE Y CRÍTICO. CAMBIAR ENTRE EL DE ARRIBA Y EL DE ABAJO SI NO FUNCIONA. LINEA 298 TMB. 
-			//gas->GetNumberOfElectronCollisions(nElastic, nIonising, nAttachment, nInelastic, nExcitation, nSuperelastic);
+			gas->GetNumberOfElectronCollisions(nElastic, nIonising, nAttachment, nInelastic, nExcitation, nSuperelastic);
 			
 			 
-			gas->GetNumberOfElectronCollisions(
-				nElastic, nIonising, nAttachment, nInelastic, nExcitation, nSuperelastic
-			);
+			//gas->GetNumberOfElectronCollisions(
+			//	nElastic, nIonising, nAttachment, nInelastic, nExcitation, nSuperelastic
+			//);
 			
 						
 			// Rellenamos la rama
@@ -365,7 +369,7 @@ int main(int argc, char *argv[]){
 	}
 
 	// OJO: pon aquí un volumen razonable para tu geometría (en cm)
-	view.SetArea(-2+pitch, -2*pitch, 0, pitch, 2*pitch, 2*pitch);
+	view.SetArea(-pitch, -pitch, 0, pitch, pitch, pitch);
 	view.SetPlaneXZ();   // X horizontal, Z vertical
 	view.SetPlaneXZ();   // X horizontal, Z vertical
 	view.Plot(true, true, false);
