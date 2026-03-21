@@ -1,3 +1,0 @@
-/home/daniel/GitHub/TFM-Simulations/electricFieldUniform_multithread/build/CMakeFiles/uniformE.dir
-/home/daniel/GitHub/TFM-Simulations/electricFieldUniform_multithread/build/CMakeFiles/edit_cache.dir
-/home/daniel/GitHub/TFM-Simulations/electricFieldUniform_multithread/build/CMakeFiles/rebuild_cache.dir
