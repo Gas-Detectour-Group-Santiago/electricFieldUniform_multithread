@@ -13,7 +13,7 @@ find_package(GSL REQUIRED)
 #target_link_libraries(uniformE Garfield::Garfield ROOT::Tree)
 
 
-add_executable(uniformE_isotropic uniformE_isotropic.cxx)
+add_executable(uniformE_isotropic uniformE_isotropic.C)
 target_link_libraries(uniformE_isotropic Garfield::Garfield ROOT::Tree)
 
 ## ---Copy all files locally to the build directory-------------------------------

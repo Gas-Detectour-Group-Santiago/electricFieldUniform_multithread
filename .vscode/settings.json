@@ -1,0 +1,27 @@
+{
+  "terminal.integrated.env.linux": {
+    "ROOTSYS": "/home/daniel/root-install",
+    "PATH": "/home/daniel/root-install/bin:${env:PATH}",
+    "LD_LIBRARY_PATH": "/home/daniel/root-install/lib:${env:LD_LIBRARY_PATH}",
+    "PYTHONPATH": "/home/daniel/root-install/lib:${env:PYTHONPATH}"
+  },
+  "C_Cpp.default.includePath": [
+    "/home/daniel/root-install/include",
+    "/home/daniel/root-install/include/ROOT"
+  ],
+  "C_Cpp_Runner.msvcBatchPath": "",
+  "files.associations": {
+    "fatGem.C": "cpp",
+    "uniformE.C": "cpp",
+    "iostream": "cpp"
+  },
+  "cmake.sourceDirectory": "/home/daniel/GitHub/TFM-Simulations/cross_section_in_gas",
+
+  "cmake.configureSettings": {
+    "CMAKE_PREFIX_PATH": "/home/daniel/garfield/install"
+  },
+
+  "cSpell.language": "es,en",
+  "python.defaultInterpreterPath": "/home/daniel/.venv/bin/python"
+
+}
