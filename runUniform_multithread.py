@@ -1,160 +1,192 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Created on Thu Dec  4 13:32:27 2025
 
-@author: pablo
-"""
-import subprocess
 import os
+import subprocess
 from multiprocessing import Pool, cpu_count
-from functools import partial
 
-def run_uniformE(args, is_isotropic):
-    mode = args[0]
+from gainCalculation import (
+    update_csv_and_fit_mix,
+    required_gap_for_gain,
+    required_E_for_gain,
+    pressure_bar_to_torr,
+    mix_slug,
+)
 
-    if mode==0: 
-        """Ejecuta ./uniformE con la lista de argumentos en el directorio build."""
-        dir_output = "build"
-        print(f"--> Lanzando simulación:\n    ./uniformE {' '.join(args[1:])}")
-        subprocess.run(["./uniformE"] + args, cwd=dir_output)
-        print(f"--> Finalizó simulación:\n    ./uniformE {' '.join(args[1:])}")
 
-    elif mode==1:
-        """Ejecuta ./uniformE con la lista de argumentos en el directorio build."""
-        dir_output = "build"
-
-        subprocess.run(["./uniformE"] + args, cwd=dir_output)
-
-        print(f"--> Lanzando simulación:\n    ./uniformE {' '.join(args[1:])}")
-        subprocess.run(["./uniformE"] + args, cwd=dir_output)
-        print(f"--> Finalizó simulación:\n    ./uniformE {' '.join(args[1:])}")
-
-    elif mode==2:
-        """Ejecuta ./uniformE con la lista de argumentos en el directorio build."""
-        dir_output = "build"
-
-        subprocess.run(["./uniformE"] + args, cwd=dir_output)
-
-        print(f"--> Lanzando simulación:\n    ./uniformE {' '.join(args[1:])}")
-        subprocess.run(["./uniformE"] + args, cwd=dir_output)
-        print(f"--> Finalizó simulación:\n    ./uniformE {' '.join(args[1:])}")
-
-    else:
-        print("ELIJE UN MODO VALIDO")
+def run_uniformE(args):
+    """
+    Ejecuta ./uniformE con la lista de argumentos en el directorio build.
+    args debe contener SOLO strings.
+    """
+    dir_output = "build"
+    printable = " ".join(args)
+    print(f"--> Lanzando simulación:\n    ./uniformE {printable}")
+    subprocess.run(["./uniformE"] + args, cwd=dir_output, check=True)
+    print(f"--> Finalizó simulación:\n    ./uniformE {printable}")
 
 
 ######################################################################
 # Parámetros del usuario
 
-# Los parámetros de simulación van en listas. Con n controlamos cuantos elementos de la lista
-# se ejecutan partiendo del elemento 0. Es decir, si es n=1, solo se ejecutará el primer ele-
-# mento de todas las listas.
-
-n = 4
+n = 2
 
 ######################################################################
 # Modo de la simulación
+#
+#   -> 0: Mode gap fixed. Modo clásico.
+#   -> 1: Mode gain fixed gap. Dada una ganancia se calcula el gap.
+#   -> 2: Mode gain fixed field. Dada una ganancia se calcula el campo eléctrico.
+#
+# En modos 1 y 2:
+#   - se actualiza el CSV desde rootArchives
+#   - se ajusta alpha/p = A exp(-B p/E) para la mezcla pedida
+#   - opcionalmente se guarda un PDF del ajuste alpha vs E
+######################################################################
 
-# En función del modo de la simulación se corre de una manera u otra. Para elegir el modo se 
-# elige un número, en función del número se activa una u otra.
-
-#   -> -1: Mode isotropic (no implemented yet).
-#   ->  0: Mode gap fixed. Modo clásico.
-#   ->  1: Mode gain fixed gap. Dado una ganancia se calcula el gap.
-#   ->  2: Mode gain fixed time. Dada una ganancia se calcula el tiempo aceptado para e- generados.
-
-
-mode = [0] * n
-
+mode = [1] * n
 
 ######################################################################
 # Parametros de la simulación
 
-
-npe       = [10000] * n            # e- primarios
-
-pressure  = [1] * n               # bar
-
-gas1      = ["ar"] * n   
-
-mixture1  = [95., 90., 33., 0.]           # % gas
-
-gas2      = ["cf4"] * n
-
-mixture2  = [5., 10., 67., 100.]                 # % gas
-
-fieldE    = [65000, 78000, 88000, 95000]   # V/cm, is_isotropic)
-
-height = [0.98] * n         # Decide a la altura que quieras lanzar la simulación (0 = Pegado al catodo +, 1 = Pegado al anodo -)
-
+npe = [100] * n
+pressure = [1] * n            # bar
+gas1 = ["ar"] * n              # "C2H2F4"
+mixture1 = [100] * n   # %
+gas2 = ["cf4"] * n
+mixture2 = [0] * n    # %
+fieldE = [50000, 70000]  # V/cm
+height = [0.98] * n
+printTable = [1] * n # 0 = True, 1 = False
 
 ######################################################################
 # Aqui eliges la ganancia o gap requeridos
-
-#  -> Si eliges mode gap, se lanza con el gap querido.
-
-#  -> Si eliges mode gain, se calcula el gap para gas, ganancia, campo eléctrico y presión demandadas. 
-
-gap       = [0.05] * n               # mm
-
-gain      = [10e4] * n               # e⁻/e⁻p
-
-
+#
+# mode 0 -> usa gap[i]
+# mode 1 -> usa gain[i] y calcula gap[i]
+# mode 2 -> usa gain[i] y calcula fieldE[i]
 ######################################################################
 
+gap = [0.05] * n               # mm
+gain = [1.0e3] * n             # e-/e-p
 
-# ---------------------------
+######################################################################
+# Configuración del ajuste / CSV / PDFs
+
+root_dir = "rootArchives"
+csv_database = "gas_data.csv"
+fit_pdf_dir = "fitPlots"
+save_fit_pdf = True
+
+######################################################################
 # COMPILACIÓN ÚNICA
-# ---------------------------
 
 subprocess.run(["rm", "-rf", "build/"])
 os.makedirs("build", exist_ok=True)
-subprocess.run(["cmake", ".."], cwd="build")
-subprocess.run("make -j$Nproc", shell=True, cwd="build")
+subprocess.run(["cmake", ".."], cwd="build", check=True)
+subprocess.run("make -j$(nproc)", shell=True, cwd="build", check=True)
 
-root_dir = "rootArchives"
-os.makedirs("rootArchives", exist_ok=True)
+os.makedirs(root_dir, exist_ok=True)
+os.makedirs(fit_pdf_dir, exist_ok=True)
 
-# ---------------------------
+######################################################################
 # PREPARACIÓN DE ARGUMENTOS
-# ---------------------------
 
 all_jobs = []
 
 for i in range(n):
+    gas1_i = gas1[i]
+    gas2_i = gas2[i]
+    mixture1_i = float(mixture1[i])
+    mixture2_i = float(mixture2[i])
+    pressure_bar_i = float(pressure[i])
+    pressure_torr_i = pressure_bar_to_torr(pressure_bar_i)
+    printTable_i = printTable[i]
+    fieldE_i = float(fieldE[i])
+    gap_i = float(gap[i])
+
+    if mode[i] in (1, 2):
+        pdf_path = None
+        if save_fit_pdf:
+            pdf_path = os.path.join(
+                fit_pdf_dir,
+                f"alpha_fit_{mix_slug(gas1_i, mixture1_i, gas2_i, mixture2_i)}.pdf"
+            )
+
+        fit_bundle = update_csv_and_fit_mix(
+            root_folder=root_dir,
+            csv_path=csv_database,
+            gas1=gas1_i,
+            composition1=mixture1_i,
+            gas2=gas2_i,
+            composition2=mixture2_i,
+            make_pdf=save_fit_pdf,
+            pdf_path=pdf_path,
+        )
+
+        fit_result = fit_bundle["fit"]
+
+        if mode[i] == 1:
+            gap_i = float(required_gap_for_gain(
+                gain=gain[i],
+                E=fieldE_i,
+                p=pressure_torr_i,
+                fit_result=fit_result,
+            ))
+            print(
+                f"[MODE 1] Mezcla {fit_bundle['mix_label']} -> "
+                f"gain={gain[i]:.5g}, E={fieldE_i:.3f} V/cm, p={pressure_bar_i:.3f} bar "
+                f"=> gap calculado = {gap_i:.6f} mm"
+            )
+
+        elif mode[i] == 2:
+            fieldE_i = float(required_E_for_gain(
+                gain=gain[i],
+                p=pressure_torr_i,
+                gap_mm=gap_i,
+                fit_result=fit_result,
+            ))
+            print(
+                f"[MODE 2] Mezcla {fit_bundle['mix_label']} -> "
+                f"gain={gain[i]:.5g}, gap={gap_i:.6f} mm, p={pressure_bar_i:.3f} bar "
+                f"=> E calculado = {fieldE_i:.6f} V/cm"
+            )
+
+        if save_fit_pdf and fit_bundle["pdf_path"] is not None:
+            print(f"[FIT PDF] Guardado en: {fit_bundle['pdf_path']}")
+
     rootFileName = (
         f"../{root_dir}/"
-        f"{gas1[i]}_{mixture2[i]:.1f}{gas2[i]}_"
-        f"{fieldE[i]/1000:.1f}kVcm_"
-        f"{pressure[i]}bar_"
-        f"{gap[i]:.2f}mm_{npe[i]}npe.root"
+        f"{gas1_i}_{mixture1_i:.1f}_{gas2_i}_{mixture2_i:.1f}_"
+        f"{fieldE_i/1000:.1f}kVcm_"
+        f"{pressure_bar_i:.3f}bar_"
+        f"{gap_i:.4f}mm_{int(npe[i])}npe.root"
     )
-    
+
     args = [
-        mode[i],
-        rootFileName,
-        str(fieldE[i]),
-        f"{gap[i]:.2f}",
-        str(pressure[i]),
-        str(npe[i]),
-        gas1[i],
-        f"{mixture1[i]:.3f}",
-        gas2[i],
-        f"{mixture2[i]:.3f}",
-        str(height[i])
+        str(rootFileName),
+        str(fieldE_i),
+        f"{gap_i:.6f}",
+        str(pressure_bar_i),
+        str(int(npe[i])),
+        str(gas1_i),
+        f"{mixture1_i:.6f}",
+        str(gas2_i),
+        f"{mixture2_i:.6f}",
+        str(height[i]),
+        str(printTable_i),
     ]
 
     all_jobs.append(args)
 
-# ---------------------------
+######################################################################
 # MULTIPROCESSING
-# ---------------------------
 
 num_cores = min(cpu_count(), n)
 print(f"\nUsando {num_cores} núcleos para las simulaciones...\n")
 
 with Pool(processes=num_cores) as pool:
-    pool.map(partial(run_uniformE), all_jobs)
+    pool.map(run_uniformE, all_jobs)
 
 print("\n✔ Todas las simulaciones han terminado.\n")
