@@ -57,11 +57,13 @@ int main(int argc, char *argv[]){
 	///////////////////////////////////////////////////////////////////////////////////
 	// Le pedimos valores de entrada al usuario
 
-	if (argc<10){
+	if (argc<12){
 		cout<<"Wrong number of arguments."<<endl;
-		cout<<"./fatGem rootFileName.root fieldE(V/cm) pitch(mm) pressure(bar) npe(#) gas1() mixture(%) gas2() mixture(%) height(0.9 to 0.999)"<<endl;
+		cout<<"./fatGem rootFileName.root fieldE(V/cm) pitch(mm) pressure(bar) npe(#) gas1() mixture(%) gas2() mixture(%) height(0.9 to 0.999) printTable(true or false)"<<endl;
 		exit(EXIT_FAILURE);
 	}
+
+	
 
 	///////////////////////////////////////////////////////////////////////////////////
 	///////////////////////////////////////////////////////////////////////////////////
@@ -113,6 +115,11 @@ int main(int argc, char *argv[]){
 	TString _height_string=argv[10];
 	double height = _height_string.Atof();
 	//const double height = double(_height); 
+
+	// True 
+	TString _printTable=argv[11];
+	bool printTable = 0 == atoi(_printTable);
+	//const double height = double(_height); 
 	
 	///////////////////////////////////////////////////////////////////////////////////
 	///////////////////////////////////////////////////////////////////////////////////
@@ -148,6 +155,7 @@ int main(int argc, char *argv[]){
 				<< " = " << mixture1 << "/" << mixture2 << "\n";
 	}
 
+	
 	// Definimos temperatura
 	gas->SetTemperature (temp);
 
@@ -158,9 +166,19 @@ int main(int argc, char *argv[]){
         //gas->SetMaxCollisionRate(10);  // 1000% del nominal
 	gas->SetMaxElectronEnergy(400.0);
 	gas->EnableDebugging ();
+
+	if (printTable) {	
+		gas->SetFieldGrid(uniformE, uniformE, 1, false);
+		gas->GenerateGasTable(3, true);
+	}
+
 	gas->PrintGas();
 	gas->Initialise ();
 	gas->DisableDebugging ();
+
+	// Tabla macroscópica de transporte para poder consultar alpha y v_drift
+	
+	
 	///////////////////////////////////////////////////////////////////////////////////
 	///////////////////////////////////////////////////////////////////////////////////
 	// Leemos el número de niveles
@@ -264,11 +282,7 @@ int main(int argc, char *argv[]){
 	dataPerPrimaryElectron->Branch("nElectrons", &ne,"nElectrons/I");  
 	dataPerPrimaryElectron->Branch("nIons", &ni, "nIons/I");
 
-	double alpha, driftVelocity;
-
 	TTree *dataOfGas = new TTree("dataOfGas", "dataOfGas");
-	dataOfGas->Branch("alpha", &alpha, "alpha/D");
-	dataOfGas->Branch("driftVelocity", &driftVelocity, "driftVelocity/D");
 	dataOfGas->Branch("electricField", &uniformE, "electricField/D");
 	dataOfGas->Branch("gap_mm", &pitch_mm, "gap_mm/D");
 	dataOfGas->Branch("pressure", &pressure,"pressure/D");
@@ -345,6 +359,7 @@ int main(int argc, char *argv[]){
 
 		// Gbtenemos el número de electrones e iones producidos en la avalancha
 		aval->GetAvalancheSize (ne, ni);
+
 		dataPerPrimaryElectron->Fill();
 
 
@@ -387,6 +402,8 @@ int main(int argc, char *argv[]){
 	
 	// CALCULO DE ALGUNOS PARÁMETROS DE INTERÉS
 	
+	double alpha, driftVelocity, eta;
+
 	double vx = 0., vy = 0., vz = 0.;
 	alpha = 0.;
 	driftVelocity = 0.;
@@ -400,16 +417,30 @@ int main(int argc, char *argv[]){
 	const double by = 0.0;
 	const double bz = 0.0;
 
-	if (!gas->ElectronTownsend(ex, ey, ez, bx, by, bz, alpha)) {
-	std::cerr << "No se pudo calcular alpha para este campo.\n";
-	}
+	
+	if (printTable) {
+		
+		if (!gas->ElectronTownsend(ex, ey, ez, bx, by, bz, alpha)) {
+		std::cerr << "No se pudo calcular alpha.\n";
+		}
+		if (!gas->ElectronAttachment(ex, ey, ez, bx, by, bz, eta)) {
+		std::cerr << "No se pudo calcular eta.\n";
+		}
+		if (!gas->ElectronVelocity(ex, ey, ez, bx, by, bz, vx, vy, vz)) {
+		std::cerr << "No se pudo calcular la velocidad de deriva.\n";
+		}
 
-	if (!gas->ElectronVelocity(ex, ey, ez, bx, by, bz, vx, vy, vz)) {
-	std::cerr << "No se pudo calcular la velocidad de deriva para este campo.\n";
-	}
+		double alphaEff = alpha - eta;           // cm^-1
+		double vdrift = std::sqrt(vx*vx + vy*vy + vz*vz); // cm/ns
+		double gain = std::exp(alphaEff * pitch);  // gap en cm
 
-	// Como el campo solo está en z, la magnitud de la deriva es |vz|.
-	driftVelocity = fabs(vz);
+		dataOfGas->Branch("alpha", &alpha, "alpha/D");
+		dataOfGas->Branch("driftVelocity", &driftVelocity, "driftVelocity/D");
+		dataOfGas->Branch("eta", &eta, "eta/D");		
+		dataOfGas->Branch("alphaEff", &alphaEff, "alphaEff/D");
+		dataOfGas->Branch("gainTeo", &gain, "gainTeo/D");
+
+	}
 
 	// Guardamos una entrada en el árbol del gas.
 	dataOfGas->Fill();
