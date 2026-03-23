@@ -27,10 +27,18 @@
 #include "Garfield/AvalancheMC.hh"
 #include "Garfield/Random.hh"
 
+
 #include <time.h>
 
 using namespace Garfield;
 using namespace std;
+
+
+void writeProgressToFile(int jobId, int current, int total) {
+    std::ofstream f("progress_" + std::to_string(jobId) + ".txt", std::ios::trunc);
+    f << current << " " << total << "\n";
+}
+
 
 /////////////////////////////////////////////////////////////////////////////////
 // Esto lo vamos a usar para guardar la información de las excitaciones -> posición donde se generan, nivel producido...
@@ -59,11 +67,9 @@ int main(int argc, char *argv[]){
 
 	if (argc<12){
 		cout<<"Wrong number of arguments."<<endl;
-		cout<<"./fatGem rootFileName.root fieldE(V/cm) pitch(mm) pressure(bar) npe(#) gas1() mixture(%) gas2() mixture(%) height(0.9 to 0.999) printTable(true or false)"<<endl;
+		cout<<"./fatGem rootFileName.root fieldE(V/cm) pitch(mm) pressure(bar) npe(#) gas1() mixture(%) gas2() mixture(%) height(1.01 to 1.1) printTable(true or false)"<<endl;
 		exit(EXIT_FAILURE);
 	}
-
-	
 
 	///////////////////////////////////////////////////////////////////////////////////
 	///////////////////////////////////////////////////////////////////////////////////
@@ -85,7 +91,8 @@ int main(int argc, char *argv[]){
 	// Pasamos el pitch a float (pitch == gap, tamaño del cámpo eléctrico)
 	TString pitchInputString=argv[3]; //input im mm
 	double_t pitch_mm = pitchInputString.Atof();
-	const double pitch = double(pitch_mm)*0.1; //convert to cm
+	double pitch = double(pitch_mm)*0.1; //convert to cm
+	const double pitch_og = pitch; //convert to cm
 
 
 	// Pasamos la presión a float
@@ -114,13 +121,19 @@ int main(int argc, char *argv[]){
 	// Pasamos 
 	TString _height_string=argv[10];
 	double height = _height_string.Atof();
+
+	std::cout << height << "\n";
+	pitch = pitch * height;
 	//const double height = double(_height); 
 
 	// True 
 	TString _printTable=argv[11];
 	bool printTable = 0 == atoi(_printTable);
 	//const double height = double(_height); 
-	
+
+	TString jobIdString = argv[12];
+	int jobId = jobIdString.Atoi();
+
 	///////////////////////////////////////////////////////////////////////////////////
 	///////////////////////////////////////////////////////////////////////////////////
 	// Inicializamos el tiempo
@@ -297,9 +310,6 @@ int main(int argc, char *argv[]){
 	// Hacemos la simulación, para el número de electrones deseados
 	
 	ViewDrift view;
-	TCanvas* c = new TCanvas("c", "Drift", 900, 700);
-	view.SetCanvas(c);
-	view.SetArea(-pitch, -pitch, -pitch, pitch, pitch, pitch);
 
 	// Si quieres snapshot:
 	//view.SetSnapshotFile("drift.png");
@@ -318,10 +328,10 @@ int main(int argc, char *argv[]){
 	bool flag = true;
 
 	// IMPORTANTE Y CRÍTICO. CAMBIAR ENTRE EL DE ARRIBA Y EL DE ABAJO SI NO FUNCIONA. LINEA 347 TMB
-	std::size_t nElastic= 0, nIonising= 0, nAttachment= 0, nInelastic= 0, nExcitation= 0, nSuperelastic = 0;
+	//std::size_t nElastic= 0, nIonising= 0, nAttachment= 0, nInelastic= 0, nExcitation= 0, nSuperelastic = 0;
 	
-	//unsigned int nElastic = 0, nIonising = 0, nAttachment = 0;
-	//unsigned int nInelastic = 0, nExcitation = 0, nSuperelastic = 0;
+	unsigned int nElastic = 0, nIonising = 0, nAttachment = 0;
+	unsigned int nInelastic = 0, nExcitation = 0, nSuperelastic = 0;
 	
         double theta0, phi0;
 	for (eventNumber = 0; eventNumber < npe; eventNumber++)
@@ -334,11 +344,11 @@ int main(int argc, char *argv[]){
 		y0 = gRandom->Uniform(-pitch, pitch);
 
 		
-		 phi0= gRandom->Uniform(0, 2 * TMath::Pi());
-		 theta0 = gRandom->Uniform(TMath::Pi()/2, TMath::Pi());
+		phi0= gRandom->Uniform(0, 2 * TMath::Pi());
+		theta0 = gRandom->Uniform(TMath::Pi()/2 + TMath::Pi()/4, TMath::Pi() - TMath::Pi()/4);
 
 		// Emitimos el electrón en la parte de arriba
-		z0 =  pitch * height;	
+		z0 =  pitch_og ;	
 
 		t0 = 0.0;
 
@@ -354,11 +364,16 @@ int main(int argc, char *argv[]){
 		aval->AvalancheElectron (x0, y0, z0, t0, e0, TMath::Cos(phi0)*TMath::Sin(theta0),  TMath::Sin(phi0)*TMath::Sin(theta0),  TMath::Cos(theta0));
 		//aval->AvalancheElectron (x0, y0, z0, t0, e0, 0,  0,  0);
 
-
+				
 		//std::cout << eventNumber + 1 << " finished " << npe << endl;
 
 		// Gbtenemos el número de electrones e iones producidos en la avalancha
 		aval->GetAvalancheSize (ne, ni);
+
+		
+		if ((eventNumber + 1) % 1 == 0 || eventNumber + 1 == npe) {
+			std::cout << "PROGRESS " << jobId << " " << (eventNumber + 1) << " " << npe << std::endl;
+		}
 
 		dataPerPrimaryElectron->Fill();
 
@@ -375,7 +390,7 @@ int main(int argc, char *argv[]){
 			
 			
 			// IMPORTANTE Y CRÍTICO. CAMBIAR ENTRE EL DE ARRIBA Y EL DE ABAJO SI NO FUNCIONA. LINEA 298 TMB. 
-			//gas->GetNumberOfElectronCollisions(nElastic, nIonising, nAttachment, nInelastic, nExcitation, nSuperelastic);
+			gas->GetNumberOfElectronCollisions(nElastic, nIonising, nAttachment, nInelastic, nExcitation, nSuperelastic);
 			
 			 
 			//gas->GetNumberOfElectronCollisions(
@@ -390,14 +405,17 @@ int main(int argc, char *argv[]){
 	}
 
 	// OJO: pon aquí un volumen razonable para tu geometría (en cm)
+	
+	/*
+	TCanvas* c = new TCanvas("c", "Drift", 900, 700);
+	view.SetCanvas(c);
 	view.SetArea(-2*pitch, -2*pitch, -0.08*pitch, 2*pitch, 2*pitch, 1.08*pitch);
 	view.SetPlaneXZ();   // X horizontal, Z vertical
 	view.SetPlaneXZ();   // X horizontal, Z vertical
 	view.Plot(true, true, false);
-
-
-	//c->Update();
-	//c->SaveAs("drift.pdf");
+	c->Update();
+	c->SaveAs("drift.pdf");
+	*/
 
 	
 	// CALCULO DE ALGUNOS PARÁMETROS DE INTERÉS
@@ -417,7 +435,8 @@ int main(int argc, char *argv[]){
 	const double by = 0.0;
 	const double bz = 0.0;
 
-	
+	double dl = 0.0, dt = 0.0;
+
 	if (printTable) {
 		
 		if (!gas->ElectronTownsend(ex, ey, ez, bx, by, bz, alpha)) {
@@ -430,14 +449,25 @@ int main(int argc, char *argv[]){
 		std::cerr << "No se pudo calcular la velocidad de deriva.\n";
 		}
 
+		if (!gas->ElectronDiffusion(ex, ey, ez, bx, by, bz, dl, dt)) {
+		std::cout << "Dl = " << dl << " sqrt(cm)\n";
+		std::cout << "Dt = " << dt << " sqrt(cm)\n";
+		} else {
+		std::cerr << "No hay datos de difusión para ese campo.\n";
+		}
+
 		double alphaEff = alpha - eta;           // cm^-1
 		double vdrift = std::sqrt(vx*vx + vy*vy + vz*vz); // cm/ns
 		double gain = std::exp(alphaEff * pitch);  // gap en cm
 
 		dataOfGas->Branch("alpha", &alpha, "alpha/D");
+		dataOfGas->Branch("driftVelocity_x", &vx, "driftVelocity_x/D");
+		dataOfGas->Branch("driftVelocity_y", &vy, "driftVelocity_y/D");
 		dataOfGas->Branch("driftVelocity_z", &vz, "driftVelocity_z/D");
 		dataOfGas->Branch("eta", &eta, "eta/D");		
 		dataOfGas->Branch("alphaEff", &alphaEff, "alphaEff/D");
+		dataOfGas->Branch("DifussionLong", &dl, "DifussionLong/D");
+		dataOfGas->Branch("DifussionTrans", &dt, "DifussionTrans/D");
 		dataOfGas->Branch("gainTeo", &gain, "gainTeo/D");
 
 	}
