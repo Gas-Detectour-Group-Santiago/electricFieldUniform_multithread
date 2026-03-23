@@ -435,7 +435,7 @@ int main(int argc, char *argv[]){
 		double gain = std::exp(alphaEff * pitch);  // gap en cm
 
 		dataOfGas->Branch("alpha", &alpha, "alpha/D");
-		dataOfGas->Branch("driftVelocity", &driftVelocity, "driftVelocity/D");
+		dataOfGas->Branch("driftVelocity_z", &vz, "driftVelocity_z/D");
 		dataOfGas->Branch("eta", &eta, "eta/D");		
 		dataOfGas->Branch("alphaEff", &alphaEff, "alphaEff/D");
 		dataOfGas->Branch("gainTeo", &gain, "gainTeo/D");
