@@ -43,7 +43,7 @@ gas2 = ["cf4"] * n
 mixture2 = [0] * n        # %
 fieldE = [65000, 78000, 88000, 95000]  # V/cm
 height = [1.1] * n
-printTable = [0] * n               # 0 = True, 1 = False
+printTable = [1] * n               # 0 = True, 1 = False
 
 ######################################################################
 # mode 0 -> usa gap[i]
