@@ -72,7 +72,7 @@ def load_gas_dataframe_from_roots(folder, tree_name="dataOfGas", recursive=True)
                 gap_arr = _read_first_existing_branch(tree, ["gap_mm", "gap"])
                 pressure_arr = _read_first_existing_branch(tree, ["pressure"])
                 temp_arr = _read_first_existing_branch(tree, ["temp", "temperature"])
-                alpha_arr = _read_first_existing_branch(tree, ["alpha"])
+                alpha_arr = _read_first_existing_branch(tree, ["alphaEff"])
                 vz_arr = _read_first_existing_branch(tree, ["driftVelocity", "vz"])
 
                 n = tree.num_entries
@@ -88,7 +88,7 @@ def load_gas_dataframe_from_roots(folder, tree_name="dataOfGas", recursive=True)
                         "gap": _to_python_scalar(gap_arr[i]) if gap_arr is not None else np.nan,
                         "pressure": _to_python_scalar(pressure_arr[i]) if pressure_arr is not None else np.nan,
                         "temperature": _to_python_scalar(temp_arr[i]) if temp_arr is not None else np.nan,
-                        "alpha": _to_python_scalar(alpha_arr[i]) if alpha_arr is not None else np.nan,
+                        "alphaEff": _to_python_scalar(alpha_arr[i]) if alpha_arr is not None else np.nan,
                         "vz": _to_python_scalar(vz_arr[i]) if vz_arr is not None else np.nan,
                     })
 
@@ -100,7 +100,7 @@ def load_gas_dataframe_from_roots(folder, tree_name="dataOfGas", recursive=True)
         "gas1", "gas2",
         "composition1", "composition2",
         "electricField", "gap", "pressure", "temperature",
-        "alpha", "vz"
+        "alphaEff", "vz"
     ])
 
     return df
@@ -115,7 +115,7 @@ def _normalize_dataframe_for_merge(df):
 
     text_cols = ["file", "gas1", "gas2"]
     numeric_cols = ["composition1", "composition2", "electricField",
-                    "gap", "pressure", "temperature", "alpha", "vz"]
+                    "gap", "pressure", "temperature", "alphaEff", "vz"]
 
     for col in text_cols:
         if col in df.columns:
@@ -207,7 +207,7 @@ def merge_with_existing_csv(df_new, output_csv):
         "gas1", "gas2",
         "composition1", "composition2",
         "electricField", "gap", "pressure", "temperature",
-        "alpha", "vz"
+        "alphaEff", "vz"
     ]
 
     for col in all_columns:

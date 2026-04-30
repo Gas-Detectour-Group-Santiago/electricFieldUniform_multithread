@@ -106,7 +106,7 @@ def select_mix(df, gas1, composition1, gas2=None, composition2=0.0, comp_tol=1e-
     return df[mask].copy()
 
 
-def _prepare_townsend_data(df_mix, e_col="electricField", p_col="pressure", alpha_col="alpha"):
+def _prepare_townsend_data(df_mix, e_col="electricField", p_col="pressure", alpha_col="alphaEff"):
     data = df_mix[[e_col, p_col, alpha_col]].copy()
     data = data.replace([np.inf, -np.inf], np.nan).dropna()
     data = data[(data[e_col] > 0) & (data[p_col] > 0) & (data[alpha_col] > 0)].copy()
@@ -124,7 +124,7 @@ def _prepare_townsend_data(df_mix, e_col="electricField", p_col="pressure", alph
     return data, E, p, alpha, X, ylog
 
 
-def fit_townsend_AB(df_mix, e_col="electricField", p_col="pressure", alpha_col="alpha"):
+def fit_townsend_AB(df_mix, e_col="electricField", p_col="pressure", alpha_col="alphaEff"):
     """
     Ajuste clásico de Korff/Townsend:
         alpha / p = A * exp(-B * p / E)
@@ -191,7 +191,7 @@ def fit_townsend_generalized(
     df_mix,
     e_col="electricField",
     p_col="pressure",
-    alpha_col="alpha",
+    alpha_col="alphaEff",
     loss="soft_l1",
     f_scale=0.15,
     max_nfev=50000,
@@ -445,9 +445,9 @@ def plot_alpha_fit_by_pressure(
     Guarda un PDF con alpha vs E para las top-N presiones con más datos.
     Se muestran los puntos y la curva del ajuste global.
     """
-    data = df_mix[["electricField", "pressure", "alpha"]].copy()
+    data = df_mix[["electricField", "pressure", "alphaEff"]].copy()
     data = data.replace([np.inf, -np.inf], np.nan).dropna()
-    data = data[(data["electricField"] > 0) & (data["pressure"] > 0) & (data["alpha"] > 0)].copy()
+    data = data[(data["electricField"] > 0) & (data["pressure"] > 0) & (data["alphaEff"] > 0)].copy()
 
     if data.empty:
         raise ValueError("No hay datos válidos para graficar alpha vs E.")
@@ -472,7 +472,7 @@ def plot_alpha_fit_by_pressure(
 
         plt.scatter(
             subset["electricField"].to_numpy(),
-            subset["alpha"].to_numpy(),
+            subset["alphaEff"].to_numpy(),
             label=f"Datos p = {pressure_value * BAR_PER_TORR:.3f} Bar (N={len(subset)})",
         )
 

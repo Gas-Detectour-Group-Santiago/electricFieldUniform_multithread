@@ -229,7 +229,7 @@ int main(int argc, char *argv[]){
 	};
 
 	componentUniformElectricField->SetElectricField(efield);
-	componentUniformElectricField->SetArea(-8 * pitch, -8 * pitch, 0.0, 8 * pitch, 8 * pitch, pitch);
+	componentUniformElectricField->SetArea(-8 * pitch, -8 * pitch, 0.0, 8 * pitch, 8 * pitch, pitch*height);
 	componentUniformElectricField->SetMedium(gas);
 
 	///////////////////////////////////////////////////////////////////////////////////

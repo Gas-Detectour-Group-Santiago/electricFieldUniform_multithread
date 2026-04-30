@@ -4,6 +4,7 @@
 import os
 import subprocess
 import threading
+import numpy as np
 
 from tqdm import tqdm
 
@@ -18,7 +19,7 @@ from gainCalculation import (
 ######################################################################
 # Parámetros del usuario
 
-n = 4
+n = 12
 
 ######################################################################
 # Modo de la simulación
@@ -26,33 +27,44 @@ n = 4
 #   0: gap fijo
 #   1: gain fija -> calcula gap
 #   2: gain fija -> calcula campo E
-
+#
 ######################################################################
 
-mode = [1] * n
+mode = [2] * n
 
 ######################################################################
 # Parámetros de la simulación
 
+# npe             = [50] * n
+# pressure        = [5] * n                                        # bar
+# gas1            = ["ar"] * (n-1) + ["cf4"]
+# mixture1        = [99.9,99.5,99,98,95,90,80,50,100] * n        # %
+# gas2            = ["cf4"] * (n-1) + ["ar"]
+# mixture2        = [0.1,0.5,1,2,5,10,20,50,0] * n           # %
+# fieldE          = [1] * n                                  # V/cm
+# height          = [1.5] * n
+# printTable      = [1] * n        # 0 -> True       
 
-npe = [100] * n
-pressure = [1] * n                 # bar
-gas1 = ["ar"] * n
-mixture1 = [100] * n         # %
-gas2 = ["cf4"] * n
-mixture2 = [0] * n        # %
-fieldE = [65000, 78000, 88000, 95000]  # V/cm
-height = [1.1] * n
-printTable = [1] * n               # 0 = True, 1 = False
+npe             = [100] * n
+pressure        = [10] * n                                        # bar
+gas1            = ["ar"] * n
+mixture1        = [99] * n        # %
+gas2            = ["cf4"] * n
+mixture2        = [1] * n          # %
+fieldE          = np.linspace(10,120,n)*1000                                 # V/cm
+height          = [1.5] * n
+printTable      = [1] * n        # 0 -> True                                 
 
 ######################################################################
+#
 # mode 0 -> usa gap[i]
 # mode 1 -> usa gain[i] y calcula gap[i]
 # mode 2 -> usa gain[i] y calcula fieldE[i]
+#
 ######################################################################
 
-gap = [0.057] * n                  # mm
-gain = [1.0e3] * n                 # e-/e-p
+gap = [0.57] * n                  # mm
+gain = [1.0e4] * n                 # e-/e-p
 
 ######################################################################
 # Configuración del ajuste / CSV / PDFs
