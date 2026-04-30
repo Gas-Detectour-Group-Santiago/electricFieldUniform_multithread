@@ -1,0 +1,30 @@
+# npe             = [50] * n
+# pressure        = [1,1, 0.3, 0.3, 1, 1]                                        # bar
+# gas1            = ["he","he","he","he","ar","ar"]  
+# mixture1        = [100, 80, 100, 80,100, 80]                                # %
+# gas2            = ["cf4","cf4","cf4"] * 2
+# mixture2        = [0,20,0, 20,0, 20]                                      # %
+# fieldE          = [18700,18700,12105,12105, 10000,29000]                          # V/cm
+# height          = [1.5] * n
+# printTable      = [1] * n                                                                # 0 = True, 1 = False
+
+
+# npe             = [1000] * n
+# pressure        = [1, 1, 1]                                        # bar
+# gas1            = ["he","he","cf4"]  
+# mixture1        = [80, 60, 100]                                # %
+# gas2            = ["cf4","cf4","he"] 
+# mixture2        = [20, 40, 0,]                                      # %
+# fieldE          = [60000,75000,95000]                          # V/cm
+# height          = [1.5] * n
+# printTable      = [1] * n                                                                # 0 = True, 1 = False
+
+# npe             = [50] * n
+# pressure        = [0.05,0.1,0.2,0.4,0.8,1]                                        # bar
+# gas1            = ["cf4"] * n
+# mixture1        = [100] * n                               # %
+# gas2            = ["ar",] * n
+# mixture2        = [0] * n                                  # %
+# fieldE          = [12281,14654,16316,26842,36842]                          # V/cm
+# height          = [1.5] * n
+# printTable      = [1] * n               
