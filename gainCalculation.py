@@ -1,5 +1,12 @@
 import os
 import re
+
+# Backend no interactivo para guardar PDFs sin usar Tkinter
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+import matplotlib
+matplotlib.use("Agg", force=True)
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -7,7 +14,6 @@ import matplotlib.pyplot as plt
 from scipy.optimize import least_squares, brentq
 
 from importing import export_roots_to_csv
-
 
 TORR_PER_BAR = 750.061683
 BAR_PER_TORR = 1.0 / TORR_PER_BAR
@@ -510,6 +516,8 @@ def plot_alpha_fit_by_pressure(
             f"N={fit_result['n_points']}"
         )
 
+    plt.xscale("log")
+    plt.yscale("log")
     plt.title(title)
     plt.grid(True, alpha=0.3)
     plt.legend()

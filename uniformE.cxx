@@ -182,10 +182,10 @@ int main(int argc, char *argv[]){
 
 	if (printTable) {	
 		gas->SetFieldGrid(uniformE, uniformE, 1, false);
-		gas->GenerateGasTable(3, true);
+		gas->GenerateGasTable(1, true);
 	}
 
-	gas->PrintGas();
+	// gas->PrintGas();
 	gas->Initialise ();
 	gas->DisableDebugging ();
 

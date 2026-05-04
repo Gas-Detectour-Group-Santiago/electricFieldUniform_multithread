@@ -19,7 +19,7 @@ from gainCalculation import (
 ######################################################################
 # Parámetros del usuario
 
-n = 12
+n = 9
 
 ######################################################################
 # Modo de la simulación
@@ -35,25 +35,25 @@ mode = [2] * n
 ######################################################################
 # Parámetros de la simulación
 
-# npe             = [50] * n
-# pressure        = [5] * n                                        # bar
-# gas1            = ["ar"] * (n-1) + ["cf4"]
-# mixture1        = [99.9,99.5,99,98,95,90,80,50,100] * n        # %
-# gas2            = ["cf4"] * (n-1) + ["ar"]
-# mixture2        = [0.1,0.5,1,2,5,10,20,50,0] * n           # %
-# fieldE          = [1] * n                                  # V/cm
-# height          = [1.5] * n
-# printTable      = [1] * n        # 0 -> True       
-
-npe             = [100] * n
+npe             = [10] * n
 pressure        = [10] * n                                        # bar
-gas1            = ["ar"] * n
-mixture1        = [99] * n        # %
-gas2            = ["cf4"] * n
-mixture2        = [1] * n          # %
-fieldE          = np.linspace(10,120,n)*1000                                 # V/cm
-height          = [1.5] * n
-printTable      = [1] * n        # 0 -> True                                 
+gas1            = ["ar"] * (n-1) + ["cf4"]
+mixture1        = [99.9,99.5,99,98,95,90,80,50,100] * n        # %
+gas2            = ["cf4"] * (n-1) + ["ar"]
+mixture2        = [0.1,0.5,1,2,5,10,20,50,0] * n           # %
+fieldE          = [190000] * n                                  # V/cm
+height          = [10] * n
+printTable      = [1] * n        # 0 -> True       
+
+# npe             = [10] * n
+# pressure        = [0.050] * n                                        # bar
+# gas1            = ["ar"] * n
+# mixture1        = [99] * n        # %
+# gas2            = ["cf4"] * n
+# mixture2        = [1] * n          # %050
+# fieldE          = np.linspace(1,50,n) *1e3                                # V/cm
+# height          = [1.5] * n
+# printTable      = [1] * n        # 0 -> True                                 
 
 ######################################################################
 #
@@ -63,7 +63,7 @@ printTable      = [1] * n        # 0 -> True
 #
 ######################################################################
 
-gap = [0.57] * n                  # mm
+gap = [0.05] * n                  # mm
 gain = [1.0e4] * n                 # e-/e-p
 
 ######################################################################
