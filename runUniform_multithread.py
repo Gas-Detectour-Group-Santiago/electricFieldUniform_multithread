@@ -4,9 +4,12 @@
 import os
 import subprocess
 import threading
+import shutil
 import numpy as np
 
 from tqdm import tqdm
+
+from importing import export_roots_to_csv
 
 from gainCalculation import (
     update_csv_and_fit_mix,
@@ -14,12 +17,30 @@ from gainCalculation import (
     required_E_for_gain,
     pressure_bar_to_torr,
     mix_slug,
+    MIN_FIT_POINTS,
 )
+
+
+######################################################################
+# Configuración del ajuste / CSV / PDFs
+
+root_dir = "rootArchives"
+alpha_backup_dir = "rootBackup"
+csv_database = "gas_data.csv"
+fit_pdf_dir = "fitPlots"
+save_fit_pdf = True
+
+# Umbral controlado desde este script.
+# Una simulación se acepta para alpha si npe >= min_npe_for_alpha.
+# Normalmente será 100, pero puedes subirlo o bajarlo aquí puntualmente.
+min_npe_for_alpha = 49
+min_fit_points = MIN_FIT_POINTS
+
 
 ######################################################################
 # Parámetros del usuario
 
-n = 9
+n = 12
 
 ######################################################################
 # Modo de la simulación
@@ -30,49 +51,38 @@ n = 9
 #
 ######################################################################
 
-mode = [2] * n
+mode = [1] * n
 
 ######################################################################
 # Parámetros de la simulación
 
-npe             = [10] * n
-pressure        = [10] * n                                        # bar
-gas1            = ["ar"] * (n-1) + ["cf4"]
-mixture1        = [99.9,99.5,99,98,95,90,80,50,100] * n        # %
-gas2            = ["cf4"] * (n-1) + ["ar"]
-mixture2        = [0.1,0.5,1,2,5,10,20,50,0] * n           # %
-fieldE          = [190000] * n                                  # V/cm
-height          = [10] * n
-printTable      = [1] * n        # 0 -> True       
-
 # npe             = [10] * n
-# pressure        = [0.050] * n                                        # bar
-# gas1            = ["ar"] * n
-# mixture1        = [99] * n        # %
-# gas2            = ["cf4"] * n
-# mixture2        = [1] * n          # %050
-# fieldE          = np.linspace(1,50,n) *1e3                                # V/cm
-# height          = [1.5] * n
-# printTable      = [1] * n        # 0 -> True                                 
+# pressure        = [1] * n                                        # bar
+# gas1            = ["ar"] * (n-1) + ["cf4"]
+# mixture1        = [99.9,99.8,99.5,99,98,95,90,85,80,50,20,100] * n        # %
+# gas2            = ["cf4"] * (n-1) + ["ar"]
+# mixture2        = [0.1,0.5,1,2,5,10,15,20,50,80,0] * n           # %
+# fieldE          = [20000] * n                                  # V/cm
+# height          = [10] * n
+
+npe             = [20] * n
+pressure        = [0.050] * n                                        # bar
+gas1            = ["ar"] * n
+mixture1        = [99] * n        # %
+gas2            = ["cf4"] * n
+mixture2        = [1] * n          # %050
+fieldE          = np.logspace(3,5,n)                            # V/cm
+height          = [15] * n
 
 ######################################################################
-#
 # mode 0 -> usa gap[i]
 # mode 1 -> usa gain[i] y calcula gap[i]
 # mode 2 -> usa gain[i] y calcula fieldE[i]
 #
 ######################################################################
 
-gap = [0.05] * n                  # mm
+gap = [0.57] * n                  # mm
 gain = [1.0e4] * n                 # e-/e-p
-
-######################################################################
-# Configuración del ajuste / CSV / PDFs
-
-root_dir = "rootArchives"
-csv_database = "gas_data.csv"
-fit_pdf_dir = "fitPlots"
-save_fit_pdf = True
 
 ######################################################################
 # Configuración de ejecución
@@ -92,6 +102,7 @@ def compile_project():
     subprocess.run("make -j$(nproc)", shell=True, cwd=build_dir, check=True)
 
     os.makedirs(root_dir, exist_ok=True)
+    os.makedirs(alpha_backup_dir, exist_ok=True)
     os.makedirs(fit_pdf_dir, exist_ok=True)
 
 
@@ -105,7 +116,10 @@ def build_jobs():
         mixture2_i = float(mixture2[i])
         pressure_bar_i = float(pressure[i])
         pressure_torr_i = pressure_bar_to_torr(pressure_bar_i)
-        printTable_i = int(printTable[i])
+        if mode[i] in (1, 2) and pressure_bar_i <= 0.0:
+            raise ValueError("Los modos 1 y 2 necesitan una presión positiva para ajustar alpha a esa presión.")
+        # Argumento heredado para mantener la CLI de uniformE; ya no activa tablas.
+        printTable_i = 1
         fieldE_i = float(fieldE[i])
         gap_i = float(gap[i])
 
@@ -114,11 +128,11 @@ def build_jobs():
             if save_fit_pdf:
                 pdf_path = os.path.join(
                     fit_pdf_dir,
-                    f"alpha_fit_{mix_slug(gas1_i, mixture1_i, gas2_i, mixture2_i)}.pdf"
+                    f"alpha_fit_{mix_slug(gas1_i, mixture1_i, gas2_i, mixture2_i)}_{pressure_bar_i:.3f}bar.pdf"
                 )
 
             fit_bundle = update_csv_and_fit_mix(
-                root_folder=root_dir,
+                root_folder=alpha_backup_dir,
                 csv_path=csv_database,
                 gas1=gas1_i,
                 composition1=mixture1_i,
@@ -126,6 +140,9 @@ def build_jobs():
                 composition2=mixture2_i,
                 make_pdf=save_fit_pdf,
                 pdf_path=pdf_path,
+                pressure=pressure_torr_i,
+                min_points=min_fit_points,
+                min_npe_for_alpha=min_npe_for_alpha,
             )
 
             fit_result = fit_bundle["fit"]
@@ -298,11 +315,59 @@ def launch_jobs(all_jobs):
             bar.close()
 
     print("✔ Todas las simulaciones han terminado.\n")
+    return procs
+
+
+def backup_completed_alpha_roots(all_jobs, procs):
+    saved = 0
+    skipped_npe = 0
+    failed = 0
+
+    os.makedirs(alpha_backup_dir, exist_ok=True)
+
+    for args, proc in zip(all_jobs, procs):
+        npe_i = int(args[4])
+        src = os.path.normpath(os.path.join(build_dir, args[0]))
+
+        if proc.returncode != 0:
+            failed += 1
+            continue
+
+        if npe_i < int(min_npe_for_alpha):
+            skipped_npe += 1
+            continue
+
+        if not os.path.exists(src):
+            print(f"[WARNING] ROOT no encontrado para backup: {src}")
+            continue
+
+        dst = os.path.join(alpha_backup_dir, os.path.basename(src))
+        shutil.copy2(src, dst)  # Sobrescribe si ya existía.
+        saved += 1
+
+    print(
+        f"[BACKUP] ROOT copiados a {alpha_backup_dir}: {saved} "
+        f"(saltados por npe < {min_npe_for_alpha}: {skipped_npe}, fallidos: {failed})."
+    )
+
+
+def update_alpha_database():
+    export_roots_to_csv(
+        folder=alpha_backup_dir,
+        output_csv=csv_database,
+        tree_name="dataOfGas",
+        recursive=True,
+        min_npe_for_alpha=min_npe_for_alpha,
+    )
+
 
 def main():
+    print(f"[ALPHA] Umbral activo: se aceptan simulaciones con npe >= {min_npe_for_alpha}.")
     compile_project()
     all_jobs = build_jobs()
-    launch_jobs(all_jobs)
+    procs = launch_jobs(all_jobs)
+    backup_completed_alpha_roots(all_jobs, procs)
+    update_alpha_database()
 
 
 if __name__ == "__main__":
