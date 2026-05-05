@@ -1,6 +1,8 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
+#include <cmath>
+#include <limits>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -65,9 +67,9 @@ int main(int argc, char *argv[]){
 	///////////////////////////////////////////////////////////////////////////////////
 	// Le pedimos valores de entrada al usuario
 
-	if (argc<12){
-		cout<<"Wrong number of arguments."<<endl;
-		cout<<"./fatGem rootFileName.root fieldE(V/cm) pitch(mm) pressure(bar) npe(#) gas1() mixture(%) gas2() mixture(%) height(1.01 to 1.1) printTable(true or false)"<<endl;
+	if (argc < 13){
+		cout << "Wrong number of arguments." << endl;
+		cout << "./uniformE rootFileName.root fieldE(V/cm) gap(mm) pressure(bar) npe(#) gas1 mixture1(%) gas2 mixture2(%) height printTable jobId" << endl;
 		exit(EXIT_FAILURE);
 	}
 
@@ -122,13 +124,14 @@ int main(int argc, char *argv[]){
 	TString _height_string=argv[10];
 	double height = _height_string.Atof();
 
-	std::cout << height << "\n";
 	pitch = pitch * height;
 	//const double height = double(_height); 
 
-	// True 
+	// Argumento conservado por compatibilidad con los scripts antiguos.
+	// Ya no se usa para calcular alpha: alpha sale directamente de ne/ni.
 	TString _printTable=argv[11];
 	bool printTable = 0 == atoi(_printTable);
+	(void) printTable;
 	//const double height = double(_height); 
 
 	TString jobIdString = argv[12];
@@ -178,18 +181,10 @@ int main(int argc, char *argv[]){
 	// Generamos las secciones eficaces de Magboltz (Steve) para generar el archivo
         //gas->SetMaxCollisionRate(10);  // 1000% del nominal
 	gas->SetMaxElectronEnergy(400.0);
-	gas->EnableDebugging ();
-
-	if (printTable) {	
-		gas->SetFieldGrid(uniformE, uniformE, 1, false);
-		gas->GenerateGasTable(1, true);
-	}
-
-	// gas->PrintGas();
 	gas->Initialise ();
-	gas->DisableDebugging ();
 
-	// Tabla macroscópica de transporte para poder consultar alpha y v_drift
+	// Ya no se genera tabla de gas ni se llama a PrintGas.
+	// El alpha que se guarda sale exclusivamente de la avalancha simulada.
 	
 	
 	///////////////////////////////////////////////////////////////////////////////////
@@ -282,6 +277,20 @@ int main(int argc, char *argv[]){
 	
 	///////////////////////////////////////////////////////////////////////////////////
 	///////////////////////////////////////////////////////////////////////////////////
+	// Variables resumen de la simulación que se guardarán en dataOfGas.
+	int npeForTree = npe;
+	Long64_t neTotal = 0;
+	Long64_t niTotal = 0;
+	double neMean = std::numeric_limits<double>::quiet_NaN();
+	double niMean = std::numeric_limits<double>::quiet_NaN();
+	double gainSim = std::numeric_limits<double>::quiet_NaN();
+	double alphaEff = std::numeric_limits<double>::quiet_NaN();
+	double alphaFromNe = std::numeric_limits<double>::quiet_NaN();
+	double alphaFromNi = std::numeric_limits<double>::quiet_NaN();
+	double vz = std::numeric_limits<double>::quiet_NaN();
+	bool validForAlpha = false;
+	std::string alphaSource = "simulation_npe";
+
 	// Creamos las ramas que vamos a necesitar (tree)
 	
 	TTree *dataPerElectron= new TTree("dataPerElectron","dataPerPrimaryElectron");
@@ -304,6 +313,19 @@ int main(int argc, char *argv[]){
 	dataOfGas->Branch("composition1", &mixture1, "composition1/D");
 	dataOfGas->Branch("gas2",  &gas2_str);
 	dataOfGas->Branch("composition2", &mixture2, "composition2/D");
+	dataOfGas->Branch("pressureBar", &pressureBar, "pressureBar/D");
+	dataOfGas->Branch("npe", &npeForTree, "npe/I");
+	dataOfGas->Branch("neTotal", &neTotal, "neTotal/L");
+	dataOfGas->Branch("niTotal", &niTotal, "niTotal/L");
+	dataOfGas->Branch("neMean", &neMean, "neMean/D");
+	dataOfGas->Branch("niMean", &niMean, "niMean/D");
+	dataOfGas->Branch("gainSim", &gainSim, "gainSim/D");
+	dataOfGas->Branch("alphaEff", &alphaEff, "alphaEff/D");
+	dataOfGas->Branch("alphaFromNe", &alphaFromNe, "alphaFromNe/D");
+	dataOfGas->Branch("alphaFromNi", &alphaFromNi, "alphaFromNi/D");
+	dataOfGas->Branch("vz", &vz, "vz/D");
+	dataOfGas->Branch("validForAlpha", &validForAlpha, "validForAlpha/O");
+	dataOfGas->Branch("alphaSource", &alphaSource);
 
 	///////////////////////////////////////////////////////////////////////////////////
 	///////////////////////////////////////////////////////////////////////////////////
@@ -321,7 +343,6 @@ int main(int argc, char *argv[]){
 
 	// Nos dice la posición-nivel de la excitacion producida y la guarda en el tree dataExc
 	
-	Int_t nelec_total = 0;
 	aval->SetUserHandleCollision(userHandle);
 
     int cuentas = 0;
@@ -369,6 +390,8 @@ int main(int argc, char *argv[]){
 
 		// Gbtenemos el número de electrones e iones producidos en la avalancha
 		aval->GetAvalancheSize (ne, ni);
+		neTotal += ne;
+		niTotal += ni;
 
 		
 		if ((eventNumber + 1) % 1 == 0 || eventNumber + 1 == npe) {
@@ -418,58 +441,38 @@ int main(int argc, char *argv[]){
 	*/
 
 	
-	// CALCULO DE ALGUNOS PARÁMETROS DE INTERÉS
+	// CALCULO DE ALPHA DESDE LA SIMULACIÓN
+	//
+	// A partir de ahora no se usa ElectronTownsend ni tablas generadas con
+	// printTable. El coeficiente efectivo sale de la ganancia simulada:
+	//
+	//     gainSim = <ne>
+	//     alphaEff = ln(gainSim) / gap_cm
+	//
+	// Además se guarda <ni>/gap_cm como referencia independiente de ionización.
+	// El filtrado npe > 100 se hace también en Python al exportar a CSV/ajustar.
 	
-	double alpha, driftVelocity, eta;
+	const double gap_cm = pitch_og;
+	if (npe > 0) {
+		neMean = static_cast<double>(neTotal) / static_cast<double>(npe);
+		niMean = static_cast<double>(niTotal) / static_cast<double>(npe);
+		gainSim = neMean;
+	}
 
-	double vx = 0., vy = 0., vz = 0.;
-	alpha = 0.;
-	driftVelocity = 0.;
+	if (std::isfinite(gainSim) && gainSim > 0.0 && gap_cm > 0.0) {
+		alphaFromNe = std::log(gainSim) / gap_cm;
+		alphaEff = alphaFromNe;
+	}
 
-	
-	const double ex = 0.0;
-	const double ey = 0.0;
-	const double ez = uniformE;
+	if (std::isfinite(niMean) && gap_cm > 0.0) {
+		alphaFromNi = niMean / gap_cm;
+	}
 
-	const double bx = 0.0;
-	const double by = 0.0;
-	const double bz = 0.0;
-
-	double dl = 0.0, dt = 0.0;
-
-	if (printTable) {
-		
-		if (!gas->ElectronTownsend(ex, ey, ez, bx, by, bz, alpha)) {
-		std::cerr << "No se pudo calcular alpha.\n";
-		}
-		if (!gas->ElectronAttachment(ex, ey, ez, bx, by, bz, eta)) {
-		std::cerr << "No se pudo calcular eta.\n";
-		}
-		if (!gas->ElectronVelocity(ex, ey, ez, bx, by, bz, vx, vy, vz)) {
-		std::cerr << "No se pudo calcular la velocidad de deriva.\n";
-		}
-
-		if (!gas->ElectronDiffusion(ex, ey, ez, bx, by, bz, dl, dt)) {
-		std::cout << "Dl = " << dl << " sqrt(cm)\n";
-		std::cout << "Dt = " << dt << " sqrt(cm)\n";
-		} else {
-		std::cerr << "No hay datos de difusión para ese campo.\n";
-		}
-
-		double alphaEff = alpha - eta;           // cm^-1
-		double vdrift = std::sqrt(vx*vx + vy*vy + vz*vz); // cm/ns
-		double gain = std::exp(alphaEff * pitch);  // gap en cm
-
-		dataOfGas->Branch("alpha", &alpha, "alpha/D");
-		dataOfGas->Branch("driftVelocity_x", &vx, "driftVelocity_x/D");
-		dataOfGas->Branch("driftVelocity_y", &vy, "driftVelocity_y/D");
-		dataOfGas->Branch("driftVelocity_z", &vz, "driftVelocity_z/D");
-		dataOfGas->Branch("eta", &eta, "eta/D");		
-		dataOfGas->Branch("alphaEff", &alphaEff, "alphaEff/D");
-		dataOfGas->Branch("DifussionLong", &dl, "DifussionLong/D");
-		dataOfGas->Branch("DifussionTrans", &dt, "DifussionTrans/D");
-		dataOfGas->Branch("gainTeo", &gain, "gainTeo/D");
-
+	validForAlpha = (npe > 100 && std::isfinite(alphaEff) && alphaEff > 0.0);
+	if (!validForAlpha) {
+		alphaEff = std::numeric_limits<double>::quiet_NaN();
+		alphaFromNe = std::numeric_limits<double>::quiet_NaN();
+		alphaFromNi = std::numeric_limits<double>::quiet_NaN();
 	}
 
 	// Guardamos una entrada en el árbol del gas.
@@ -496,7 +499,11 @@ int main(int argc, char *argv[]){
 
 
 	printf ("average # of electrons produced: %g\n",
-			((double) nelec_total) / ((double) npe));
+			((double) neTotal) / ((double) npe));
+	printf ("average # of ions produced: %g\n",
+			((double) niTotal) / ((double) npe));
+	printf ("simulated alphaEff: %g 1/cm (validForAlpha=%d)\n",
+			alphaEff, validForAlpha ? 1 : 0);
 
 	time (&tend);
 
@@ -529,6 +536,7 @@ int main(int argc, char *argv[]){
 
 	f.Close ();
 
+	std::cout << "DONE " << jobId << std::endl;
 	std::cout << "Finalizando correctamente uniformE()." << std::endl;
 	return 0;
 }

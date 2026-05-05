@@ -4,3 +4,4 @@
 
 # Ignorar todos los archivos .root
 *.root
+*.zip

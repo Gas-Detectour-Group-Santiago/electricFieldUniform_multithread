@@ -1,6 +1,7 @@
 import os
 import re
 
+
 # Backend no interactivo para guardar PDFs sin usar Tkinter
 os.environ.setdefault("MPLBACKEND", "Agg")
 
@@ -15,6 +16,8 @@ from scipy.optimize import least_squares, brentq
 
 from importing import export_roots_to_csv
 
+MIN_NPE_FOR_ALPHA = 100
+MIN_FIT_POINTS = 5
 TORR_PER_BAR = 750.061683
 BAR_PER_TORR = 1.0 / TORR_PER_BAR
 
@@ -112,13 +115,53 @@ def select_mix(df, gas1, composition1, gas2=None, composition2=0.0, comp_tol=1e-
     return df[mask].copy()
 
 
-def _prepare_townsend_data(df_mix, e_col="electricField", p_col="pressure", alpha_col="alphaEff"):
-    data = df_mix[[e_col, p_col, alpha_col]].copy()
+def _filter_alpha_source(df, min_npe_for_alpha=MIN_NPE_FOR_ALPHA):
+    data = df.copy()
+
+    # A partir de ahora alpha solo puede venir de simulaciones con npe suficiente.
+    # El umbral se pasa desde runUniform_multithread.py.
+    # Las filas antiguas calculadas con tablas de Magboltz quedan descartadas
+    # automáticamente porque no tienen npe válido.
+    if "npe" not in data.columns:
+        return data.iloc[0:0].copy()
+
+    npe = pd.to_numeric(data["npe"], errors="coerce")
+    data = data[npe >= float(min_npe_for_alpha)].copy()
+
+    if "validForAlpha" in data.columns:
+        data = data[data["validForAlpha"].fillna(False).astype(bool)].copy()
+
+    return data
+
+
+def _filter_pressure(df, pressure=None, pressure_tol=1e-6):
+    if pressure is None:
+        return df.copy()
+
+    pressure_values = pd.to_numeric(df["pressure"], errors="coerce")
+    return df[np.isclose(pressure_values, float(pressure), rtol=0.0, atol=pressure_tol)].copy()
+
+
+def _prepare_townsend_data(
+    df_mix,
+    e_col="electricField",
+    p_col="pressure",
+    alpha_col="alphaEff",
+    min_points=MIN_FIT_POINTS,
+    min_npe_for_alpha=MIN_NPE_FOR_ALPHA,
+):
+    data = _filter_alpha_source(df_mix, min_npe_for_alpha=min_npe_for_alpha)
+    data = data[[e_col, p_col, alpha_col]].copy()
     data = data.replace([np.inf, -np.inf], np.nan).dropna()
     data = data[(data[e_col] > 0) & (data[p_col] > 0) & (data[alpha_col] > 0)].copy()
 
-    if len(data) < 4:
-        raise ValueError("No hay suficientes puntos válidos para el ajuste.")
+    if len(data) < int(min_points):
+        raise ValueError(
+            f"No hay suficientes puntos válidos para el ajuste: "
+            f"{len(data)} disponibles, mínimo {int(min_points)}. "
+            f"Recuerda que solo cuentan simulaciones con npe >= {int(min_npe_for_alpha)} "
+            f"y con la misma presión."
+        )
 
     E = data[e_col].to_numpy(dtype=float)
     p = data[p_col].to_numpy(dtype=float)
@@ -130,7 +173,14 @@ def _prepare_townsend_data(df_mix, e_col="electricField", p_col="pressure", alph
     return data, E, p, alpha, X, ylog
 
 
-def fit_townsend_AB(df_mix, e_col="electricField", p_col="pressure", alpha_col="alphaEff"):
+def fit_townsend_AB(
+    df_mix,
+    e_col="electricField",
+    p_col="pressure",
+    alpha_col="alphaEff",
+    min_points=MIN_FIT_POINTS,
+    min_npe_for_alpha=MIN_NPE_FOR_ALPHA,
+):
     """
     Ajuste clásico de Korff/Townsend:
         alpha / p = A * exp(-B * p / E)
@@ -138,12 +188,16 @@ def fit_townsend_AB(df_mix, e_col="electricField", p_col="pressure", alpha_col="
     Equivalente a:
         ln(alpha/p) = ln(A) - B * (p/E)
     """
-    data = df_mix[[e_col, p_col, alpha_col]].copy()
+    data = _filter_alpha_source(df_mix, min_npe_for_alpha=min_npe_for_alpha)
+    data = data[[e_col, p_col, alpha_col]].copy()
     data = data.replace([np.inf, -np.inf], np.nan).dropna()
     data = data[(data[e_col] > 0) & (data[p_col] > 0) & (data[alpha_col] > 0)].copy()
 
-    if len(data) < 2:
-        raise ValueError("No hay suficientes puntos válidos para ajustar A y B.")
+    if len(data) < int(min_points):
+        raise ValueError(
+            f"No hay suficientes puntos válidos para ajustar A y B: "
+            f"{len(data)} disponibles, mínimo {int(min_points)}."
+        )
 
     x = data[p_col].to_numpy(dtype=float) / data[e_col].to_numpy(dtype=float)
     y = np.log(data[alpha_col].to_numpy(dtype=float) / data[p_col].to_numpy(dtype=float))
@@ -201,6 +255,8 @@ def fit_townsend_generalized(
     loss="soft_l1",
     f_scale=0.15,
     max_nfev=50000,
+    min_points=MIN_FIT_POINTS,
+    min_npe_for_alpha=MIN_NPE_FOR_ALPHA,
 ):
     """
     Ajusta el modelo generalizado:
@@ -214,11 +270,23 @@ def fit_townsend_generalized(
     El ajuste se hace en log-space y con pérdida robusta.
     """
     data, E, p, alpha, X, ylog = _prepare_townsend_data(
-        df_mix, e_col=e_col, p_col=p_col, alpha_col=alpha_col
+        df_mix,
+        e_col=e_col,
+        p_col=p_col,
+        alpha_col=alpha_col,
+        min_points=min_points,
+        min_npe_for_alpha=min_npe_for_alpha,
     )
 
     try:
-        seed = fit_townsend_AB(df_mix, e_col=e_col, p_col=p_col, alpha_col=alpha_col)
+        seed = fit_townsend_AB(
+            df_mix,
+            e_col=e_col,
+            p_col=p_col,
+            alpha_col=alpha_col,
+            min_points=min_points,
+            min_npe_for_alpha=min_npe_for_alpha,
+        )
         logA0 = np.log(max(seed["A"], 1e-30))
         logB0 = np.log(max(seed["B"], 1e-30))
         m0 = 0.5
@@ -352,78 +420,375 @@ def predict_gain(E, p, gap_mm, fit_result):
     return alpha_to_gain(alpha, gap_mm)
 
 
-def required_gap_for_gain(gain, E, p, fit_result):
+def required_gap_for_gain(
+    gain,
+    E,
+    p,
+    fit_result,
+    extrapolate=True,
+    min_alpha=1.0e-12,
+    verbose=True,
+):
     """
-    d = ln(G) / alpha -> devuelve gap en mm
+    MODO 1.
+
+    Calcula el gap necesario para obtener una ganancia dada a campo E y presión p.
+
+    Física usada:
+
+        gain = exp(alpha(E, p) * gap_cm)
+
+    Por tanto:
+
+        gap_cm = ln(gain) / alpha(E, p)
+        gap_mm = 10 * ln(gain) / alpha(E, p)
+
+    Aquí alpha(E, p) se obtiene directamente del ajuste. Si E está fuera del
+    rango de puntos usados para el fit, se evalúa igualmente el fit: eso es la
+    extrapolación natural del modelo ajustado.
     """
-    alpha = predict_alpha_from_fit(E, p, fit_result)
-
-    if np.any(alpha <= 0):
-        raise ValueError("Alpha <= 0: no se puede calcular un gap físico.")
-
-    gap_cm = np.log(np.asarray(gain, dtype=float)) / alpha
-    return gap_cm * 10.0
-
-
-def required_E_for_gain(gain, p, gap_mm, fit_result, e_min=1.0, e_max=1e6):
-    """
-    Calcula numéricamente el E necesario para lograr una ganancia dada,
-    resolviendo alpha(E, p) = ln(G)/d.
-    Devuelve E en las mismas unidades que uses en electricField.
-    """
-    alpha_target = gain_to_alpha(gain, gap_mm)
-    alpha_target = np.asarray(alpha_target, dtype=float)
-    p = np.asarray(p, dtype=float)
+    gain_arr = np.asarray(gain, dtype=float)
+    E_arr = np.asarray(E, dtype=float)
+    p_arr = np.asarray(p, dtype=float)
 
     scalar_output = False
-    if alpha_target.ndim == 0:
-        alpha_target = np.array([alpha_target], dtype=float)
+    if gain_arr.ndim == 0 and E_arr.ndim == 0 and p_arr.ndim == 0:
         scalar_output = True
 
-    if p.ndim == 0:
-        p = np.full(alpha_target.shape, float(p))
-    elif p.shape != alpha_target.shape:
-        raise ValueError("p y gain/gap deben ser compatibles en forma.")
+    gain_arr, E_arr, p_arr = np.broadcast_arrays(gain_arr, E_arr, p_arr)
 
     out = []
 
-    for alpha_t, p_t in zip(alpha_target, p):
-        if alpha_t <= 0:
-            raise ValueError("Alpha objetivo <= 0.")
+    for gain_i, E_i, p_i in zip(gain_arr.flat, E_arr.flat, p_arr.flat):
+        if not np.isfinite(gain_i) or gain_i <= 1.0:
+            raise ValueError(f"Ganancia inválida para calcular gap: {gain_i}")
+
+        if not np.isfinite(E_i) or E_i <= 0.0:
+            raise ValueError(f"Campo eléctrico inválido para calcular gap: {E_i}")
+
+        if not np.isfinite(p_i) or p_i <= 0.0:
+            raise ValueError(f"Presión inválida para calcular gap: {p_i}")
+
+        alpha_raw = float(predict_alpha_from_fit(float(E_i), float(p_i), fit_result))
+        alpha_E = alpha_raw
+
+        if not np.isfinite(alpha_E) or alpha_E <= 0.0:
+            if not extrapolate:
+                raise ValueError(
+                    "El ajuste devuelve una alpha no positiva en modo 1.\n"
+                    f"  E = {E_i:.6g} V/cm\n"
+                    f"  p = {p_i:.6g} Torr\n"
+                    f"  alpha(E,p) = {alpha_raw:.6g}"
+                )
+
+            alpha_E = float(min_alpha)
+
+            if verbose:
+                print(
+                    "[WARNING] required_gap_for_gain: alpha no positiva. "
+                    "Se fuerza una alpha mínima para no bloquear el modo 1.\n"
+                    f"  E                 = {E_i:.6g} V/cm\n"
+                    f"  p                 = {p_i:.6g} Torr\n"
+                    f"  alpha original    = {alpha_raw:.6g} cm^-1\n"
+                    f"  alpha usada       = {alpha_E:.6g} cm^-1"
+                )
+
+        gap_mm = 10.0 * np.log(gain_i) / alpha_E
+
+        if not np.isfinite(gap_mm) or gap_mm <= 0.0:
+            raise ValueError(
+                "El gap calculado no es válido.\n"
+                f"  gain        = {gain_i:.6g}\n"
+                f"  E           = {E_i:.6g} V/cm\n"
+                f"  p           = {p_i:.6g} Torr\n"
+                f"  alpha(E,p)  = {alpha_E:.6g} cm^-1\n"
+                f"  gap         = {gap_mm:.6g} mm"
+            )
+
+        if verbose:
+            print(
+                "[MODE 1 FIT] Inversa gain -> gap\n"
+                f"  gain objetivo = {gain_i:.6g}\n"
+                f"  E             = {E_i:.6g} V/cm\n"
+                f"  p             = {p_i:.6g} Torr\n"
+                f"  alpha(E,p)    = {alpha_E:.6g} cm^-1\n"
+                f"  gap calculado = {gap_mm:.6g} mm"
+            )
+
+        out.append(gap_mm)
+
+    out = np.asarray(out, dtype=float).reshape(gain_arr.shape)
+
+    return float(out.item()) if scalar_output else out
+
+
+def required_E_for_gain(
+    gain,
+    p,
+    gap_mm,
+    fit_result,
+    e_min=1.0,
+    e_max=1.0e6,
+    max_expand=80,
+    n_scan=1000,
+    extrapolate=True,
+    min_tail_exponent=1.0,
+    max_tail_exponent=6.0,
+    verbose=True,
+):
+    """
+    MODO 2.
+
+    Calcula el campo eléctrico necesario para obtener una ganancia dada a gap y
+    presión conocidos.
+
+    Física usada:
+
+        gain = exp(alpha * gap_cm)
+
+    Por tanto primero se calcula:
+
+        alpha_objetivo = ln(gain) / gap_cm
+
+    y luego se invierte el ajuste:
+
+        alpha_fit(E, p) = alpha_objetivo
+
+    Si el ajuste no encierra la solución dentro del rango cubierto, se extrapola
+    agresivamente con una cola de potencia:
+
+        alpha(E) = alpha_anchor * (E / E_anchor)^s
+
+    Esto permite lanzar simulaciones aunque el primer guess sea una locura. Los
+    nuevos ROOT entrarán después en el CSV y corregirán el ajuste.
+    """
+    gain_arr = np.asarray(gain, dtype=float)
+    p_arr = np.asarray(p, dtype=float)
+    gap_arr = np.asarray(gap_mm, dtype=float)
+
+    scalar_output = False
+    if gain_arr.ndim == 0 and p_arr.ndim == 0 and gap_arr.ndim == 0:
+        scalar_output = True
+
+    gain_arr, p_arr, gap_arr = np.broadcast_arrays(gain_arr, p_arr, gap_arr)
+
+    out = []
+
+    for gain_i, p_i, gap_i in zip(gain_arr.flat, p_arr.flat, gap_arr.flat):
+        if not np.isfinite(gain_i) or gain_i <= 1.0:
+            raise ValueError(f"Ganancia inválida para calcular E: {gain_i}")
+
+        if not np.isfinite(p_i) or p_i <= 0.0:
+            raise ValueError(f"Presión inválida para calcular E: {p_i}")
+
+        if not np.isfinite(gap_i) or gap_i <= 0.0:
+            raise ValueError(f"Gap inválido para calcular E: {gap_i}")
+
+        gap_cm = gap_i * 0.1
+        alpha_target = float(np.log(gain_i) / gap_cm)
+
+        if not np.isfinite(alpha_target) or alpha_target <= 0.0:
+            raise ValueError(
+                "Alpha objetivo inválida.\n"
+                f"  gain = {gain_i:.6g}\n"
+                f"  gap  = {gap_i:.6g} mm\n"
+                f"  alpha_objetivo = {alpha_target:.6g} cm^-1"
+            )
+
+        def alpha_fit(E):
+            return float(predict_alpha_from_fit(float(E), float(p_i), fit_result))
 
         def f(E):
-            return predict_alpha_from_fit(E, p_t, fit_result) - alpha_t
+            return alpha_fit(E) - alpha_target
 
         lo = float(e_min)
         hi = float(e_max)
 
-        flo = f(lo)
-        fhi = f(hi)
+        if lo <= 0.0 or hi <= lo:
+            raise ValueError(f"Rango de búsqueda inválido: e_min={lo}, e_max={hi}")
 
-        n_expand = 0
-        while fhi < 0 and n_expand < 60:
+        found = False
+        bracket = None
+        last_E = None
+        last_alpha = None
+
+        # --------------------------------------------------------------
+        # 1) Inversa normal del ajuste.
+        # --------------------------------------------------------------
+        for _ in range(int(max_expand) + 1):
+            scan_E = np.geomspace(lo, hi, int(n_scan))
+            scan_alpha = np.array([alpha_fit(E) for E in scan_E], dtype=float)
+
+            finite = np.isfinite(scan_E) & np.isfinite(scan_alpha)
+            scan_E = scan_E[finite]
+            scan_alpha = scan_alpha[finite]
+
+            if len(scan_E) < 2:
+                hi *= 2.0
+                continue
+
+            last_E = scan_E
+            last_alpha = scan_alpha
+
+            scan_f = scan_alpha - alpha_target
+
+            zero_idx = np.where(np.isclose(scan_f, 0.0, rtol=1e-8, atol=1e-12))[0]
+            if len(zero_idx) > 0:
+                bracket = (float(scan_E[zero_idx[0]]), float(scan_E[zero_idx[0]]))
+                found = True
+                break
+
+            for j in range(len(scan_E) - 1):
+                f1 = scan_f[j]
+                f2 = scan_f[j + 1]
+
+                if not np.isfinite(f1) or not np.isfinite(f2):
+                    continue
+
+                if f1 * f2 <= 0.0:
+                    bracket = (float(scan_E[j]), float(scan_E[j + 1]))
+                    found = True
+                    break
+
+            if found:
+                break
+
             hi *= 2.0
-            fhi = f(hi)
-            n_expand += 1
 
-        if flo > 0:
-            raise ValueError("El e_min ya da una alpha mayor que la objetivo.")
-        if fhi < 0:
-            raise ValueError("No se ha podido encerrar la solución aumentando e_max.")
+        if found and bracket is not None:
+            a, b = bracket
 
-        out.append(brentq(f, lo, hi))
+            if a == b:
+                E_solution = a
+            else:
+                E_solution = float(brentq(f, a, b))
 
-    out = np.asarray(out)
-    return out[0] if scalar_output else out
+            if verbose:
+                print(
+                    "[MODE 2 FIT] Inversa gain -> E\n"
+                    f"  gain objetivo  = {gain_i:.6g}\n"
+                    f"  gap            = {gap_i:.6g} mm\n"
+                    f"  p              = {p_i:.6g} Torr\n"
+                    f"  alpha objetivo = {alpha_target:.6g} cm^-1\n"
+                    f"  E calculado    = {E_solution:.6g} V/cm"
+                )
+
+            out.append(E_solution)
+            continue
+
+        # --------------------------------------------------------------
+        # 2) Extrapolación agresiva si el ajuste no alcanza.
+        # --------------------------------------------------------------
+        if not extrapolate:
+            raise ValueError(
+                "No se ha podido encerrar la solución aumentando e_max.\n"
+                f"  gain objetivo  = {gain_i:.6g}\n"
+                f"  gap            = {gap_i:.6g} mm\n"
+                f"  p              = {p_i:.6g} Torr\n"
+                f"  alpha objetivo = {alpha_target:.6g} cm^-1"
+            )
+
+        if last_E is None or last_alpha is None or len(last_E) < 2:
+            raise ValueError("No hay valores finitos del ajuste para construir extrapolación.")
+
+        positive = (
+            np.isfinite(last_E)
+            & (last_E > 0.0)
+            & np.isfinite(last_alpha)
+            & (last_alpha > 0.0)
+        )
+
+        if not np.any(positive):
+            raise ValueError(
+                "El ajuste no devuelve alpha positiva; no se puede extrapolar.\n"
+                f"  gain objetivo  = {gain_i:.6g}\n"
+                f"  gap            = {gap_i:.6g} mm\n"
+                f"  p              = {p_i:.6g} Torr\n"
+                f"  alpha objetivo = {alpha_target:.6g} cm^-1"
+            )
+
+        E_pos = last_E[positive]
+        alpha_pos = last_alpha[positive]
+
+        E_anchor = float(E_pos[-1])
+        alpha_anchor = float(alpha_pos[-1])
+
+        n_tail = min(8, len(E_pos))
+
+        if n_tail >= 2:
+            x_tail = np.log(E_pos[-n_tail:])
+            y_tail = np.log(alpha_pos[-n_tail:])
+
+            try:
+                slope = float(np.polyfit(x_tail, y_tail, 1)[0])
+            except Exception:
+                slope = np.nan
+        else:
+            slope = np.nan
+
+        try:
+            m_fit = float(fit_result.get("m", np.nan))
+        except Exception:
+            m_fit = np.nan
+
+        slope_candidates = [
+            s for s in [slope, m_fit]
+            if np.isfinite(s) and s > 0.0
+        ]
+
+        if slope_candidates:
+            tail_exponent = max(slope_candidates)
+        else:
+            tail_exponent = float(min_tail_exponent)
+
+        tail_exponent = max(float(tail_exponent), float(min_tail_exponent))
+        tail_exponent = min(float(tail_exponent), float(max_tail_exponent))
+
+        E_solution = E_anchor * (alpha_target / alpha_anchor) ** (1.0 / tail_exponent)
+        E_solution = float(E_solution)
+
+        if not np.isfinite(E_solution) or E_solution <= 0.0:
+            raise ValueError(
+                "La extrapolación produjo un campo inválido.\n"
+                f"  gain objetivo  = {gain_i:.6g}\n"
+                f"  gap            = {gap_i:.6g} mm\n"
+                f"  p              = {p_i:.6g} Torr\n"
+                f"  alpha objetivo = {alpha_target:.6g} cm^-1\n"
+                f"  E_anchor       = {E_anchor:.6g} V/cm\n"
+                f"  alpha_anchor   = {alpha_anchor:.6g} cm^-1\n"
+                f"  tail_exponent  = {tail_exponent:.6g}"
+            )
+
+        if verbose:
+            gain_anchor = float(np.exp(alpha_anchor * gap_cm))
+
+            print(
+                "[WARNING] MODE 2: usando extrapolación agresiva para invertir alpha(E,p).\n"
+                f"  gain objetivo       = {gain_i:.6g}\n"
+                f"  gap                 = {gap_i:.6g} mm\n"
+                f"  p                   = {p_i:.6g} Torr\n"
+                f"  alpha objetivo      = {alpha_target:.6g} cm^-1\n"
+                f"  E_anchor            = {E_anchor:.6g} V/cm\n"
+                f"  alpha_anchor        = {alpha_anchor:.6g} cm^-1\n"
+                f"  gain_anchor         = {gain_anchor:.6g}\n"
+                f"  exponente cola      = {tail_exponent:.6g}\n"
+                f"  E extrapolado       = {E_solution:.6g} V/cm"
+            )
+
+        out.append(E_solution)
+
+    out = np.asarray(out, dtype=float).reshape(gain_arr.shape)
+
+    return float(out.item()) if scalar_output else out
 
 
 def mix_label(gas1, composition1, gas2=None, composition2=0.0):
     mix = _canonical_mix(gas1, gas2, composition1, composition2)
 
     if len(mix) == 1:
-        return f"{mix[0][0]} {mix[0][1]:.0f}%"
+        return f"{mix[0][0]} {mix[0][1]:.2f}%"
 
-    parts = [f"{gas} {comp:.0f}%" for gas, comp in mix]
+    parts = [f"{gas} {comp:.2f}%" for gas, comp in mix]
     return " / ".join(parts)
 
 
@@ -445,18 +810,28 @@ def plot_alpha_fit_by_pressure(
     composition2=0.0,
     pdf_dir="fitPlots",
     pdf_path=None,
-    top_n_pressures=3,
+    top_n_pressures=1,
+    min_npe_for_alpha=MIN_NPE_FOR_ALPHA,
 ):
     """
     Guarda un PDF con alpha vs E para las top-N presiones con más datos.
     Se muestran los puntos y la curva del ajuste global.
+
+    Importante:
+    Usa el mismo min_npe_for_alpha que el ajuste. Si desde runUniform_multithread.py
+    pones min_npe_for_alpha = 49, el PDF también usa 49 y no vuelve al default 100.
     """
-    data = df_mix[["electricField", "pressure", "alphaEff"]].copy()
+    data = _filter_alpha_source(df_mix, min_npe_for_alpha=min_npe_for_alpha)
+    data = data[["electricField", "pressure", "alphaEff"]].copy()
     data = data.replace([np.inf, -np.inf], np.nan).dropna()
     data = data[(data["electricField"] > 0) & (data["pressure"] > 0) & (data["alphaEff"] > 0)].copy()
 
     if data.empty:
-        raise ValueError("No hay datos válidos para graficar alpha vs E.")
+        print(
+            "[WARNING] No hay datos válidos para graficar alpha vs E "
+            f"con min_npe_for_alpha={min_npe_for_alpha}. No se guarda PDF."
+        )
+        return None
 
     pressure_counts = data["pressure"].value_counts()
     top_pressures = pressure_counts.index[:top_n_pressures].tolist()
@@ -538,18 +913,34 @@ def fit_mix_from_dataframe(
     make_pdf=False,
     pdf_dir="fitPlots",
     pdf_path=None,
+    pressure=None,
+    pressure_tol=1e-6,
+    min_points=MIN_FIT_POINTS,
+    min_npe_for_alpha=MIN_NPE_FOR_ALPHA,
 ):
     df_mix = select_mix(df, gas1, composition1, gas2, composition2)
 
+    if pressure is not None:
+        df_mix = _filter_pressure(df_mix, pressure=pressure, pressure_tol=pressure_tol)
+
     if df_mix.empty:
+        p_msg = "" if pressure is None else f" a p={float(pressure):.6g} Torr"
         raise ValueError(
-            f"No hay datos en el CSV para la mezcla {mix_label(gas1, composition1, gas2, composition2)}."
+            f"No hay datos en el CSV para la mezcla {mix_label(gas1, composition1, gas2, composition2)}{p_msg}."
         )
 
     if model == "generalized":
-        fit_result = fit_townsend_generalized(df_mix)
+        fit_result = fit_townsend_generalized(
+            df_mix,
+            min_points=min_points,
+            min_npe_for_alpha=min_npe_for_alpha,
+        )
     elif model == "korff":
-        fit_result = fit_townsend_AB(df_mix)
+        fit_result = fit_townsend_AB(
+            df_mix,
+            min_points=min_points,
+            min_npe_for_alpha=min_npe_for_alpha,
+        )
     else:
         raise ValueError("model debe ser 'generalized' o 'korff'.")
 
@@ -558,6 +949,7 @@ def fit_mix_from_dataframe(
         "df_mix": df_mix,
         "mix_label": mix_label(gas1, composition1, gas2, composition2),
         "pdf_path": None,
+        "pressure": pressure,
     }
 
     if make_pdf:
@@ -570,6 +962,7 @@ def fit_mix_from_dataframe(
             composition2=composition2,
             pdf_dir=pdf_dir,
             pdf_path=pdf_path,
+            min_npe_for_alpha=min_npe_for_alpha,
         )
 
     return result
@@ -585,6 +978,10 @@ def fit_mix_from_csv(
     make_pdf=False,
     pdf_dir="fitPlots",
     pdf_path=None,
+    pressure=None,
+    pressure_tol=1e-6,
+    min_points=MIN_FIT_POINTS,
+    min_npe_for_alpha=MIN_NPE_FOR_ALPHA,
 ):
     df = pd.read_csv(csv_path)
     return fit_mix_from_dataframe(
@@ -597,6 +994,10 @@ def fit_mix_from_csv(
         make_pdf=make_pdf,
         pdf_dir=pdf_dir,
         pdf_path=pdf_path,
+        pressure=pressure,
+        pressure_tol=pressure_tol,
+        min_points=min_points,
+        min_npe_for_alpha=min_npe_for_alpha,
     )
 
 
@@ -613,6 +1014,10 @@ def update_csv_and_fit_mix(
     make_pdf=False,
     pdf_dir="fitPlots",
     pdf_path=None,
+    pressure=None,
+    pressure_tol=1e-6,
+    min_points=MIN_FIT_POINTS,
+    min_npe_for_alpha=MIN_NPE_FOR_ALPHA,
 ):
     """
     Flujo completo:
@@ -626,6 +1031,7 @@ def update_csv_and_fit_mix(
         output_csv=csv_path,
         tree_name=tree_name,
         recursive=recursive,
+        min_npe_for_alpha=min_npe_for_alpha,
     )
 
     return fit_mix_from_dataframe(
@@ -638,6 +1044,10 @@ def update_csv_and_fit_mix(
         make_pdf=make_pdf,
         pdf_dir=pdf_dir,
         pdf_path=pdf_path,
+        pressure=pressure,
+        pressure_tol=pressure_tol,
+        min_points=min_points,
+        min_npe_for_alpha=min_npe_for_alpha,
     )
 
 

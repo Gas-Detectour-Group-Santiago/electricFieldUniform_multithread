@@ -81,3 +81,37 @@ mixture1 = [99.0]   # % mezcla Gas1
 gas2 = ["cf4"]      # Gas2 (código Magboltz)
 mixture2 = [1.0]    # % mezcla Gas2
 ```
+
+---
+
+## Cálculo actual de alpha
+
+El cálculo de `alpha` ya no depende de `PrintGas`, `GenerateGasTable`, `ElectronTownsend` ni de `printTable`. Cada ROOT guarda ahora en `dataOfGas` la información directa de la avalancha:
+
+- `npe`
+- `neTotal`, `niTotal`
+- `neMean`, `niMean`
+- `gainSim = <ne>`
+- `alphaEff = ln(gainSim) / gap_cm`
+- `alphaFromNi = <ni> / gap_cm`
+- `pressure`, `pressureBar`, `gap`, `electricField`
+- `validForAlpha`
+
+Solo se consideran válidas para el ajuste las simulaciones con:
+
+```text
+npe >= min_npe_for_alpha
+alphaEff > 0
+```
+
+Al terminar las simulaciones, `runUniform_multithread.py` copia automáticamente los ROOT válidos a:
+
+```text
+rootBackup/
+```
+
+Si el archivo ya existe, se sobrescribe. Después se actualiza `gas_data.csv` leyendo ese backup.
+
+Cuando varios ROOT coinciden en mezcla, presión, gap, campo eléctrico y temperatura, el CSV los fusiona en una única fila. La media de `neMean`, `niMean` y `gainSim` se pondera por `npe`; después se recalcula `alphaEff` desde la ganancia media combinada. Así una simulación con más `npe` pesa más.
+
+El ajuste de alpha para los modos 1 y 2 se hace solo con una presión: la presión de la simulación que se quiere lanzar. Además, para ajustar se exige un mínimo de 5 puntos válidos a esa misma presión.
