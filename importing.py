@@ -89,7 +89,7 @@ def _safe_int(x, default=0):
 def _fallback_avalanche_stats(root_file):
     """
     Recupera npe, ne y ni desde dataPerPrimaryElectron cuando el ROOT todavía
-    no tiene esos campos resumidos en dataOfGas.
+    no tiene esos campos resumidos en gasData.
     """
     stats = {
         "npe": np.nan,
@@ -150,7 +150,7 @@ def _alpha_ion_from_ni_and_gap(ni_mean, gap_mm):
 
 def load_gas_dataframe_from_roots(
     folder,
-    tree_name="dataOfGas",
+    tree_name="gasData",
     recursive=True,
     min_npe_for_alpha=DEFAULT_MIN_NPE_FOR_ALPHA,
 ):
@@ -171,10 +171,13 @@ def load_gas_dataframe_from_roots(
     for filepath in root_files:
         try:
             with uproot.open(filepath) as f:
-                if tree_name not in f:
+                tree = None
+                for candidate in dict.fromkeys((tree_name, "gasData", "dataOfGas")):
+                    if candidate in f:
+                        tree = f[candidate]
+                        break
+                if tree is None:
                     continue
-
-                tree = f[tree_name]
                 fallback = _fallback_avalanche_stats(f)
 
                 gas1_arr = _read_first_existing_branch(tree, ["gas1"])
@@ -553,7 +556,7 @@ def merge_with_existing_csv(df_new, output_csv, min_npe_for_alpha=DEFAULT_MIN_NP
 def export_roots_to_csv(
     folder,
     output_csv="gas_data.csv",
-    tree_name="dataOfGas",
+    tree_name="gasData",
     recursive=True,
     min_npe_for_alpha=DEFAULT_MIN_NPE_FOR_ALPHA,
 ):

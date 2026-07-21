@@ -1008,7 +1008,7 @@ def update_csv_and_fit_mix(
     composition1,
     gas2=None,
     composition2=0.0,
-    tree_name="dataOfGas",
+    tree_name="gasData",
     recursive=True,
     model="generalized",
     make_pdf=False,

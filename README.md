@@ -1,117 +1,109 @@
-# Simulación de Campo Eléctrico Uniforme
+# Simulación de campo eléctrico uniforme
 
-Este módulo realiza la simulación de avalanchas electrónicas en un **campo eléctrico uniforme** mediante el uso de **Garfield++** y **Magboltz**. Incluye un programa principal en C++ (`uniformE.C`) que efectúa la simulación física, y un script auxiliar en Python (`runUniform.py`) que automatiza la compilación y ejecución del código. Está diseñado para hacerse en **UBUNTU 24.04.3 LTS**. 
+Este módulo simula avalanchas electrónicas microscópicas en un campo eléctrico uniforme con Garfield++ y Magboltz. Mantiene los tres modos actuales de trabajo:
 
-Si no se quiere ejecutar con python, desde la carpeta principal electricFieldUniform: 
+- `mode = 0`: gap y campo fijos.
+- `mode = 1`: ganancia fijada y cálculo del gap mediante el ajuste de `alpha`.
+- `mode = 2`: ganancia fijada y cálculo del campo mediante el ajuste de `alpha`.
+
+La configuración habitual se realiza en `runUniform_multithread.py`.
+
+## Estructura
+
+```text
+.
+├── CMakeLists.txt
+├── uniformE.cxx
+├── runUniform_multithread.py
+├── importing.py
+├── gainCalculation.py
+├── gas_data.csv
+├── fitPlots/
+├── rootArchives/
+└── rootBackup/
+```
+
+Cuando se activa la creación del GIF, se utiliza además:
+
+```text
+space_charge_gif/
+```
+
+## Dependencias
+
+- Garfield++
+- ROOT
+- GSL
+- CMake
+- Python 3
+- NumPy, pandas, uproot, matplotlib, SciPy y tqdm
+
+## Ejecución
 
 ```bash
-rm -f build
-mkdir build
-cd build
-cmake ..
-make 
-./uniformE ../rootArchives/ar1.0cf4_15.0kVcmbar_20npe.root 15000 1.00 1 20 ar 99.0 cf4 1.0
+python3 runUniform_multithread.py
 ```
 
-En el caso de ejecucción con python simplemente:
+El script recompila el ejecutable, lanza los trabajos en paralelo, actualiza los ROOT de `rootBackup/`, reconstruye `gas_data.csv` y genera los ajustes de `alpha` usados por los modos 1 y 2.
 
-```bash
-python3 runUniform.py
-```
+## Nuevos controles microscópicos
 
-Las condiciones de la simulación se cambian dentro del propio archivo. 
-
-
----
-
-## 📂 Estructura del directorio
- 
-```
-electricFieldUniform/
-│
-├── CMakeLists.txt # Configuración de compilación del código C++
-├── runUniform.py # Script en Python para compilar y ejecutar las simulaciones
-└── uniformE.C # Código fuente en C++ que realiza la simulación principal
-```
-
-## ⚙️ Dependencias
-
-- **Garfield++**  
-- **ROOT**  
-- **CMake**  
-- **Python 3.x**
-
-Asegúrate de que las bibliotecas de Garfield++ y ROOT estén correctamente instaladas y configuradas en tu entorno antes de compilar.
-
----
-
-## 🧩 Descripción de los archivos principales
-
-### `uniformE.C`
-Código principal en C++ que:
-- Configura el gas o mezcla de gases, presión y temperatura mediante **MediumMagboltz**.  
-- Define un **campo eléctrico uniforme** para lo cual necesitamos un gap y un valor del campo usando `ComponentUser`.  
-- Simula avalanchas microscópicas de electrones mediante `AvalancheMicroscopic`.  
-- Registra los resultados en un archivo **ROOT**, con información de:
-  - Niveles de excitación,
-  - Energías electrónicas,
-  - Datos por electrón
-  - Datos por electrón primario (ej: Número de electrones e iones producidos).
-  - Dato de las excitaciones (posiciones donde se producen e intante temporal, número de ellas). 
-- Gráfico eje X-Z del seguimiento microscópico de los electrones.
-
-### `runUniform_multithread.py`
-
-Script en Python que:
-- Limpia y recompila el proyecto mediante **CMake**.  
-- Define los parámetros de simulación (gases, presión, campo, etc.).  
-- Ejecuta automáticamente el binario `uniformE` con los argumentos apropiados.  
-
-Se puede seleccionar en el archivo de python la presión (bar), gap (mm), campo eléctrico (V/cm), mezcla de gases (2 gases actualmente) y número de eventos/electrones primarios.
-
-La lista permite que se ejecuten varios procesos a la vez, dependiendo la cantidad de núcleos, ahorrando una gran cantidad de horas al usuario- 
+Se configuran al principio de `runUniform_multithread.py`:
 
 ```python
-npe = [20]          # Nº de electrones primarios
-pressure = [1]      # Presión en bar
-gap = [1]           # Distancia del campo (mm)
-fieldE = [15000]    # Campo eléctrico (V/cm)
-gas1 = ["ar"]       # Gas1 (código Magboltz)
-mixture1 = [99.0]   # % mezcla Gas1
-gas2 = ["cf4"]      # Gas2 (código Magboltz)
-mixture2 = [1.0]    # % mezcla Gas2
+enable_space_charge = False
+make_gif = False
+max_electron_energy_inputs = 200_000
 ```
 
----
+- `enable_space_charge`: activa o desactiva la acumulación de los iones positivos como anillos cargados. Los iones producidos por una avalancha afectan a las avalanchas primarias posteriores. No se realiza propagación iónica.
+- `make_gif`: activa o desactiva el GIF de la primera avalancha de cada trabajo.
+- `max_electron_energy_inputs`: máximo de energías almacenadas para construir `hElectronEnergyDistribution`. El límite duro es `200000`.
 
-## Cálculo actual de alpha
+Las excitaciones no se guardan evento a evento. Se acumulan durante la simulación en histogramas de tamaño fijo, por lo que el peso del ROOT no crece con el número de excitaciones.
 
-El cálculo de `alpha` ya no depende de `PrintGas`, `GenerateGasTable`, `ElectronTownsend` ni de `printTable`. Cada ROOT guarda ahora en `dataOfGas` la información directa de la avalancha:
+Los doce primeros argumentos del ejecutable C++ no han cambiado. Los controles anteriores se pasan como argumentos opcionales al final de la línea de comandos.
+
+## Contenido de los ROOT
+
+Los nombres comunes se han uniformado con el repositorio de avalanchas:
+
+- `gasData`
+- `dataPerPrimaryElectron`
+- `dataPerElectron`
+
+También se guardan:
+
+- `hElectronEnergyDistribution`: distribución energética obtenida durante el transporte microscópico, incluyendo los pasos del algoritmo de null collisions y limitada al máximo configurado mediante muestreo de reservorio.
+- `hLevels`: número de excitaciones electrónicas por nivel de Magboltz.
+- `hExcXY`: distribución transversal conjunta de las posiciones de excitación.
+- `hExcZT`: distribución conjunta de profundidad y tiempo de las excitaciones. El eje temporal se amplía automáticamente si aparecen tiempos fuera del rango inicial, manteniendo fijo el número de bins.
+
+`DataExc` se ha eliminado. Para reconstruir excitaciones en los proyectos consumidores se muestrea por Monte Carlo:
+
+1. `(x, y)` desde `hExcXY`.
+2. `(z, t)` desde `hExcZT`.
+3. el nivel desde `hLevels`.
+
+Esta aproximación conserva las correlaciones `x-y` y `z-t`, pero asume independencia entre la estructura transversal, la evolución longitudinal-temporal y el nivel excitado.
+
+`dataPerPrimaryElectron` contiene únicamente:
+
+- `ne`: electrones finales de la avalancha primaria.
+- `ni`: iones producidos.
+- `npe`: número de electrones primarios representados por la entrada; vale `1` en cada fila.
+
+## Cálculo de alpha
+
+Cada ROOT nuevo guarda en `gasData`:
 
 - `npe`
 - `neTotal`, `niTotal`
 - `neMean`, `niMean`
 - `gainSim = <ne>`
 - `alphaEff = ln(gainSim) / gap_cm`
-- `alphaFromNi = <ni> / gap_cm`
-- `pressure`, `pressureBar`, `gap`, `electricField`
-- `validForAlpha`
+- `alphaFromNe`, `alphaFromNi`
+- presión, gap, campo y composición del gas
+- estado de space charge, GIF y estadísticas de los nuevos outputs
 
-Solo se consideran válidas para el ajuste las simulaciones con:
-
-```text
-npe >= min_npe_for_alpha
-alphaEff > 0
-```
-
-Al terminar las simulaciones, `runUniform_multithread.py` copia automáticamente los ROOT válidos a:
-
-```text
-rootBackup/
-```
-
-Si el archivo ya existe, se sobrescribe. Después se actualiza `gas_data.csv` leyendo ese backup.
-
-Cuando varios ROOT coinciden en mezcla, presión, gap, campo eléctrico y temperatura, el CSV los fusiona en una única fila. La media de `neMean`, `niMean` y `gainSim` se pondera por `npe`; después se recalcula `alphaEff` desde la ganancia media combinada. Así una simulación con más `npe` pesa más.
-
-El ajuste de alpha para los modos 1 y 2 se hace solo con una presión: la presión de la simulación que se quiere lanzar. Además, para ajustar se exige un mínimo de 5 puntos válidos a esa misma presión.
+`importing.py` usa `gasData` por defecto, pero conserva lectura de `dataOfGas` para poder reutilizar ROOT antiguos.

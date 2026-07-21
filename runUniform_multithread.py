@@ -28,6 +28,7 @@ root_dir = "rootArchives"
 alpha_backup_dir = "rootBackup"
 csv_database = "gas_data.csv"
 fit_pdf_dir = "fitPlots"
+gif_dir = "space_charge_gif"
 save_fit_pdf = True
 
 # Umbral controlado desde este script.
@@ -40,7 +41,7 @@ min_fit_points = MIN_FIT_POINTS
 ######################################################################
 # Parámetros del usuario
 
-n = 12
+n = 6
 
 ######################################################################
 # Modo de la simulación
@@ -51,7 +52,7 @@ n = 12
 #
 ######################################################################
 
-mode = [1] * n
+mode = [2] * n
 
 ######################################################################
 # Parámetros de la simulación
@@ -65,13 +66,13 @@ mode = [1] * n
 # fieldE          = [20000] * n                                  # V/cm
 # height          = [10] * n
 
-npe             = [20] * n
-pressure        = [0.050] * n                                        # bar
+npe             = [50] * n
+pressure        = [0.2,1,10,0.05,1,10]                                  # bar
 gas1            = ["ar"] * n
-mixture1        = [99] * n        # %
+mixture1        = [100]  * n      # %
 gas2            = ["cf4"] * n
-mixture2        = [1] * n          # %050
-fieldE          = np.logspace(3,5,n)                            # V/cm
+mixture2        = [0]   * n        # %050
+fieldE          = [12300] * n                      # V/cm
 height          = [15] * n
 
 ######################################################################
@@ -81,8 +82,23 @@ height          = [15] * n
 #
 ######################################################################
 
-gap = [0.57] * n                  # mm
-gain = [1.0e4] * n                 # e-/e-p
+gap = [0.050,0.050,0.050,0.57,0.57,0.57]                 # mm
+gain = [1.0e2] * n                 # e-/e-p
+
+######################################################################
+# Outputs microscópicos y opciones pesadas
+#
+# Se aplican a todos los jobs de esta ejecución.
+
+enable_space_charge = False
+make_gif = False
+
+# hElectronEnergyDistribution se muestrea en los pasos microscópicos del
+# algoritmo de null collisions. El C++ impone además un máximo duro de 200000.
+max_electron_energy_inputs = 200_000
+
+# Las excitaciones se acumulan directamente en hExcXY y hExcZT. El tamaño
+# del ROOT ya no crece con el número de excitaciones simuladas.
 
 ######################################################################
 # Configuración de ejecución
@@ -104,9 +120,13 @@ def compile_project():
     os.makedirs(root_dir, exist_ok=True)
     os.makedirs(alpha_backup_dir, exist_ok=True)
     os.makedirs(fit_pdf_dir, exist_ok=True)
+    if make_gif:
+        os.makedirs(gif_dir, exist_ok=True)
 
 
 def build_jobs():
+    if not 0 <= int(max_electron_energy_inputs) <= 200_000:
+        raise ValueError("max_electron_energy_inputs debe estar entre 0 y 200000.")
     all_jobs = []
 
     for i in range(n):
@@ -180,16 +200,20 @@ def build_jobs():
             if save_fit_pdf and fit_bundle["pdf_path"] is not None:
                 print(f"[FIT PDF] Guardado en: {fit_bundle['pdf_path']}")
 
-        rootFileName = (
-            f"../{root_dir}/"
+        root_stem = (
             f"{gas1_i}_{mixture1_i:.1f}_{gas2_i}_{mixture2_i:.1f}_"
             f"{fieldE_i/1000:.1f}kVcm_"
             f"{pressure_bar_i:.3f}bar_"
-            f"{gap_i:.4f}mm_{int(npe[i])}npe.root"
+            f"{gap_i:.4f}mm_{int(npe[i])}npe"
+        )
+        rootFileName = f"../{root_dir}/{root_stem}.root"
+        gifFileName = (
+            f"../{gif_dir}/{root_stem}_avalanche.gif"
+            if make_gif else "none"
         )
 
-        # OJO:
-        # el último argumento es jobId
+        # Los 12 primeros argumentos conservan exactamente la CLI original.
+        # A continuación se pasan los nuevos controles opcionales.
         args = [
             str(rootFileName),
             f"{fieldE_i:.6f}",
@@ -203,11 +227,17 @@ def build_jobs():
             f"{height[i]:.4f}",
             str(printTable_i),
             str(i),  # jobId
+            str(int(enable_space_charge)),
+            str(int(make_gif)),
+            str(int(max_electron_energy_inputs)),
+            str(gifFileName),
         ]
 
         all_jobs.append(args)
 
     return all_jobs
+
+
 def monitor_process(proc, bar, job_index):
     while True:
         raw = proc.stdout.readline()
@@ -355,7 +385,7 @@ def update_alpha_database():
     export_roots_to_csv(
         folder=alpha_backup_dir,
         output_csv=csv_database,
-        tree_name="dataOfGas",
+        tree_name="gasData",
         recursive=True,
         min_npe_for_alpha=min_npe_for_alpha,
     )
