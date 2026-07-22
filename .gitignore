@@ -2,3 +2,12 @@ build/
 outputs/
 __pycache__/
 *.pyc
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Generated files
+*.root
