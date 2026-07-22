@@ -1,0 +1,13 @@
+scan_mode: field  # Simular campos eléctricos directamente
+
+mixtures:
+  ArCF4: [1, 5, 10]  # Porcentaje de CF4
+  ArC2H2F4: [10]     # Ar 90% + C2H2F4 10%
+
+pressures_bar: [1]   # Presión en bar
+
+fields_kv_cm:
+  0.05: [25, 35, 45]  # Gap 0.05 mm, campos en kV/cm
+
+npe: 100      # Electrones primarios
+workers: 2    # Procesos paralelos

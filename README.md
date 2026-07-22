@@ -1,109 +1,101 @@
-# Simulación de campo eléctrico uniforme
+# electricUniform
 
-Este módulo simula avalanchas electrónicas microscópicas en un campo eléctrico uniforme con Garfield++ y Magboltz. Mantiene los tres modos actuales de trabajo:
+Simulación microscópica de avalanchas en campo uniforme y búsqueda automática de los campos necesarios para alcanzar ganancias concretas.
 
-- `mode = 0`: gap y campo fijos.
-- `mode = 1`: ganancia fijada y cálculo del gap mediante el ajuste de `alpha`.
-- `mode = 2`: ganancia fijada y cálculo del campo mediante el ajuste de `alpha`.
+## Uso normal
 
-La configuración habitual se realiza en `runUniform_multithread.py`.
-
-## Estructura
-
-```text
-.
-├── CMakeLists.txt
-├── uniformE.cxx
-├── runUniform_multithread.py
-├── importing.py
-├── gainCalculation.py
-├── gas_data.csv
-├── fitPlots/
-├── rootArchives/
-└── rootBackup/
-```
-
-Cuando se activa la creación del GIF, se utiliza además:
-
-```text
-space_charge_gif/
-```
-
-## Dependencias
-
-- Garfield++
-- ROOT
-- GSL
-- CMake
-- Python 3
-- NumPy, pandas, uproot, matplotlib, SciPy y tqdm
-
-## Ejecución
+Edita `campaign.yaml` y ejecuta:
 
 ```bash
-python3 runUniform_multithread.py
+python3 run_campaign.py campaign.yaml
 ```
 
-El script recompila el ejecutable, lanza los trabajos en paralelo, actualiza los ROOT de `rootBackup/`, reconstruye `gas_data.csv` y genera los ajustes de `alpha` usados por los modos 1 y 2.
+No hay que introducir campos eléctricos ni `npe`.
 
-## Nuevos controles microscópicos
+El programa:
 
-Se configuran al principio de `runUniform_multithread.py`:
+1. lee los ROOT existentes;
+2. calcula `alphaEffective = log(gain) / gap`;
+3. ajusta, para cada mezcla, concentración y gap,
 
-```python
-enable_space_charge = False
-make_gif = False
-max_electron_energy_inputs = 200_000
+   ```text
+   alphaEffective / p = A (E / p)^m exp[-(B / (E / p))^n]
+   ```
+
+4. propone automáticamente nuevos campos;
+5. conserva todas las simulaciones, aunque no alcancen la ganancia buscada;
+6. repite hasta quedar dentro de `gain_tolerance`;
+7. adapta `npe` al coste de la avalancha y a su error estadístico;
+8. ejecuta familias independientes en paralelo.
+
+## Outputs
+
+```text
+outputs/
+├── roots/
+│   └── <mixture>/
+│       └── gap_<gap>mm/
+│           └── *.root
+├── alpha/
+│   └── <mixture>/
+│       └── gap_<gap>mm.json
+└── gifs/
+    └── *.gif
 ```
 
-- `enable_space_charge`: activa o desactiva la acumulación de los iones positivos como anillos cargados. Los iones producidos por una avalancha afectan a las avalanchas primarias posteriores. No se realiza propagación iónica.
-- `make_gif`: activa o desactiva el GIF de la primera avalancha de cada trabajo.
-- `max_electron_energy_inputs`: máximo de energías almacenadas para construir `hElectronEnergyDistribution`. El límite duro es `200000`.
+`outputs/roots` contiene únicamente ROOTs. `outputs/alpha` contiene únicamente los puntos y parámetros necesarios para reconstruir e invertir las curvas de `alphaEffective`.
 
-Las excitaciones no se guardan evento a evento. Se acumulan durante la simulación en histogramas de tamaño fijo, por lo que el peso del ROOT no crece con el número de excitaciones.
+## Geometría
 
-Los doce primeros argumentos del ejecutable C++ no han cambiado. Los controles anteriores se pasan como argumentos opcionales al final de la línea de comandos.
+- Ánodo: `z = 0`.
+- Lanzamiento del electrón: `z = gap`.
+- Distancia usada en la ganancia y en `alphaEffective`: exactamente `gap`.
+- Límite superior: `zMax = heightFactor × gap`.
+- Valor por defecto: `heightFactor = 1.5`.
+- Rango transversal de simulación, `hExcXY` y GIF: `x,y ∈ [-2 gap,+2 gap]`.
 
-## Contenido de los ROOT
+El factor de altura solo añade margen por encima del plano de lanzamiento. No cambia la distancia física empleada para calcular la ganancia.
 
-Los nombres comunes se han uniformado con el repositorio de avalanchas:
+Puede añadirse opcionalmente al YAML:
 
-- `gasData`
-- `dataPerPrimaryElectron`
-- `dataPerElectron`
+```yaml
+height_factor: 1.5
+```
 
-También se guardan:
+## Contenido de cada ROOT
 
-- `hElectronEnergyDistribution`: distribución energética obtenida durante el transporte microscópico, incluyendo los pasos del algoritmo de null collisions y limitada al máximo configurado mediante muestreo de reservorio.
-- `hLevels`: número de excitaciones electrónicas por nivel de Magboltz.
-- `hExcXY`: distribución transversal conjunta de las posiciones de excitación.
-- `hExcZT`: distribución conjunta de profundidad y tiempo de las excitaciones. El eje temporal se amplía automáticamente si aparecen tiempos fuera del rango inicial, manteniendo fijo el número de bins.
+```text
+gasData
+dataPerPrimaryElectron: ne, ni, npe
+dataPerElectron: status
+hElectronEnergyDistribution
+hLevels
+hExcXY
+hExcZT
+```
 
-`DataExc` se ha eliminado. Para reconstruir excitaciones en los proyectos consumidores se muestrea por Monte Carlo:
+Las excitaciones se reconstruyen por Monte Carlo muestreando de forma independiente:
 
-1. `(x, y)` desde `hExcXY`.
-2. `(z, t)` desde `hExcZT`.
-3. el nivel desde `hLevels`.
+- `(x, y)` desde `hExcXY`;
+- `(z, t)` desde `hExcZT`;
+- nivel excitado desde `hLevels`.
 
-Esta aproximación conserva las correlaciones `x-y` y `z-t`, pero asume independencia entre la estructura transversal, la evolución longitudinal-temporal y el nivel excitado.
+## GUI
 
-`dataPerPrimaryElectron` contiene únicamente:
+```bash
+python3 gui.py
+```
 
-- `ne`: electrones finales de la avalancha primaria.
-- `ni`: iones producidos.
-- `npe`: número de electrones primarios representados por la entrada; vale `1` en cada fila.
+La pestaña **Campaign** edita y ejecuta el YAML. La pestaña **GIF** permite seleccionar mezcla, concentración, presión, gap, campo o ganancia, `heightFactor`, `tMax`, número de frames, `npe`, space charge y movimiento de iones.
 
-## Cálculo de alpha
+En el GIF los iones pueden mantenerse en su posición de creación o moverse hacia el plano superior con una velocidad constante configurable. La velocidad es un parámetro visual del GIF y no se usa en la simulación microscópica ni en el cálculo de `alphaEffective`. Cuando `space charge` está activo, las posiciones instantáneas de electrones e iones se emplean para reconstruir `Delta V_SC` en cada frame.
 
-Cada ROOT nuevo guarda en `gasData`:
+Los GIFs se generan aparte y no modifican los ajustes de alpha.
 
-- `npe`
-- `neTotal`, `niTotal`
-- `neMean`, `niMean`
-- `gainSim = <ne>`
-- `alphaEff = ln(gainSim) / gap_cm`
-- `alphaFromNe`, `alphaFromNi`
-- presión, gap, campo y composición del gas
-- estado de space charge, GIF y estadísticas de los nuevos outputs
+## Dependencias Python
 
-`importing.py` usa `gasData` por defecto, pero conserva lectura de `dataOfGas` para poder reutilizar ROOT antiguos.
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Además se necesitan ROOT, Garfield++, Magboltz y CMake.

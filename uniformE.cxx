@@ -4,16 +4,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
-#include <fstream>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include <TApplication.h>
 #include <TCanvas.h>
+#include <TColor.h>
 #include <TFile.h>
 #include <TGraph.h>
 #include <TH1D.h>
@@ -22,8 +26,10 @@
 #include <TLatex.h>
 #include <TLine.h>
 #include <TMath.h>
+#include <TPad.h>
 #include <TRandom.h>
 #include <TROOT.h>
+#include <TStyle.h>
 #include <TSystem.h>
 #include <TTree.h>
 
@@ -33,42 +39,36 @@
 #include "Garfield/Medium.hh"
 #include "Garfield/MediumMagboltz.hh"
 #include "Garfield/Sensor.hh"
+#include "Garfield/ViewDrift.hh"
 
 using namespace Garfield;
 
 namespace {
 
 constexpr double kTorrPerBar = 750.061683;
-constexpr Long64_t kHardMaxElectronEnergySamples = 200000;
+constexpr int kElasticType = 0;
+constexpr int kIonisationType = 1;
+constexpr int kAttachmentType = 2;
+constexpr int kInelasticType = 3;
+constexpr int kExcitationType = 4;
+constexpr int kSuperelasticType = 5;
+constexpr int kEnergyBins = 1000;
+constexpr int kExcitationBins = 256;
+constexpr Long64_t kMaxEnergySamples = 200000;
+constexpr double kInitialTimeRangeNs = 10.0;
 constexpr double kSpaceChargeToleranceCm = 1.0e-5;
-constexpr int kGifMaxFrames = 100;
-constexpr int kGifDelay = 3;
-constexpr int kExcitationCollisionType = 4;
-constexpr int kExcitationXYBins = 256;
-constexpr int kExcitationZBins = 256;
-constexpr int kExcitationTimeBins = 256;
-constexpr double kInitialExcitationTimeMaxNs = 10.0;
 
-double quiet_nan() { return std::numeric_limits<double>::quiet_NaN(); }
+// ============================================================================
+//                              Configuration
+// ============================================================================
 
 int parse_int(const char* text, const char* name) {
   try {
     std::size_t used = 0;
     const int value = std::stoi(text, &used);
-    if (used != std::string(text).size()) throw std::invalid_argument("trailing characters");
+    if (used != std::string(text).size()) throw std::invalid_argument("suffix");
     return value;
-  } catch (const std::exception&) {
-    throw std::runtime_error(std::string("Invalid integer for ") + name + ": " + text);
-  }
-}
-
-Long64_t parse_long64(const char* text, const char* name) {
-  try {
-    std::size_t used = 0;
-    const long long value = std::stoll(text, &used);
-    if (used != std::string(text).size()) throw std::invalid_argument("trailing characters");
-    return static_cast<Long64_t>(value);
-  } catch (const std::exception&) {
+  } catch (...) {
     throw std::runtime_error(std::string("Invalid integer for ") + name + ": " + text);
   }
 }
@@ -77,387 +77,778 @@ double parse_double(const char* text, const char* name) {
   try {
     std::size_t used = 0;
     const double value = std::stod(text, &used);
-    if (used != std::string(text).size()) throw std::invalid_argument("trailing characters");
+    if (used != std::string(text).size()) throw std::invalid_argument("suffix");
     return value;
-  } catch (const std::exception&) {
+  } catch (...) {
     throw std::runtime_error(std::string("Invalid number for ") + name + ": " + text);
   }
 }
 
-struct SimulationConfig {
+struct Config {
   std::string root_file;
-  double electric_field_v_cm = 0.0;
+  std::string mixture_name;
+  double field_v_cm = 0.0;
   double gap_mm = 0.0;
   double pressure_bar = 0.0;
-  int npe = 0;
+  int min_npe = 10;
+  int max_npe = 100;
+  double target_relative_error = 0.03;
   std::string gas1;
   double composition1 = 0.0;
   std::string gas2;
   double composition2 = 0.0;
-  double height = 1.0;
-  bool legacy_print_table = false;
-  int job_id = 0;
-
-  bool enable_space_charge = false;
+  double height_factor = 1.5;
+  bool space_charge = false;
   bool make_gif = false;
-  Long64_t max_electron_energy_samples = kHardMaxElectronEnergySamples;
+  double gif_tmax_ns = 0.0;
+  int gif_frames = 80;
+  bool gif_move_ions = true;
+  double gif_ion_speed_cm_ns = 1.0e-4;
+  bool record_excitation_positions = true;
+  bool measure_gas_transport = true;
+  int job_id = 0;
   std::string gif_file;
 
   double temperature_k = 293.15;
   double initial_energy_ev = 0.1;
   double max_electron_energy_ev = 400.0;
-  int electron_energy_bins = 1000;
 
   double pressure_torr() const { return pressure_bar * kTorrPerBar; }
-  double gap_cm() const { return gap_mm * 0.1; }
-
-  // Preserve the geometry convention already used by electricUniform.
-  double sensor_extent_cm() const { return gap_cm() * height; }
-  double component_zmax_cm() const { return sensor_extent_cm() * height; }
+  double gap_cm() const { return 0.1 * gap_mm; }
+  double launch_z_cm() const { return gap_cm(); }
+  double z_max_cm() const { return height_factor * gap_cm(); }
+  double xy_half_width_cm() const { return 2.0 * gap_cm(); }
 };
-
-SimulationConfig parse_arguments(int argc, char* argv[]) {
-  if (argc < 13) {
-    throw std::runtime_error(
-        "Usage: ./uniformE rootFileName.root fieldE(V/cm) gap(mm) pressure(bar) "
-        "npe gas1 mixture1(%) gas2 mixture2(%) height printTable jobId "
-        "[enableSpaceCharge] [makeGif] [maxEEDInputs] [gifFile]");
-  }
-
-  SimulationConfig c;
-  c.root_file = argv[1];
-  c.electric_field_v_cm = parse_double(argv[2], "fieldE");
-  c.gap_mm = parse_double(argv[3], "gap");
-  c.pressure_bar = parse_double(argv[4], "pressure");
-  c.npe = parse_int(argv[5], "npe");
-  c.gas1 = argv[6];
-  c.composition1 = parse_double(argv[7], "mixture1");
-  c.gas2 = argv[8];
-  c.composition2 = parse_double(argv[9], "mixture2");
-  c.height = parse_double(argv[10], "height");
-  c.legacy_print_table = parse_int(argv[11], "printTable") == 0;
-  c.job_id = parse_int(argv[12], "jobId");
-
-  if (argc > 13) c.enable_space_charge = parse_int(argv[13], "enableSpaceCharge") != 0;
-  if (argc > 14) c.make_gif = parse_int(argv[14], "makeGif") != 0;
-  if (argc > 15) c.max_electron_energy_samples = parse_long64(argv[15], "maxEEDInputs");
-  // New CLI: gifFile is argv[16]. For compatibility with the immediately
-  // previous version, also accept the old argv[18] position.
-  if (argc > 18) {
-    c.gif_file = argv[18];
-  } else if (argc > 16) {
-    c.gif_file = argv[16];
-  }
-
-  if (c.electric_field_v_cm <= 0.0) throw std::runtime_error("fieldE must be positive");
-  if (c.gap_mm <= 0.0) throw std::runtime_error("gap must be positive");
-  if (c.pressure_bar <= 0.0) throw std::runtime_error("pressure must be positive");
-  if (c.npe <= 0) throw std::runtime_error("npe must be positive");
-  if (c.height <= 0.0) throw std::runtime_error("height must be positive");
-  if (c.composition1 < 0.0 || c.composition2 < 0.0) {
-    throw std::runtime_error("gas compositions cannot be negative");
-  }
-  if (c.max_electron_energy_samples < 0 ||
-      c.max_electron_energy_samples > kHardMaxElectronEnergySamples) {
-    throw std::runtime_error("maxEEDInputs must be between 0 and 200000");
-  }
-  if (c.make_gif && (c.gif_file.empty() || c.gif_file == "none")) {
-    c.gif_file = c.root_file;
-    const std::size_t root_pos = c.gif_file.rfind(".root");
-    if (root_pos != std::string::npos) c.gif_file.erase(root_pos);
-    c.gif_file += "_avalanche.gif";
-  }
-
-  return c;
-}
 
 struct LevelInfo {
+  int level = -1;
   int gas_index = -1;
-  int type = 0;
-  double energy_ev = quiet_nan();
+  int component_slot = -1;
+  int process_type = -1;
+  std::string gas_name;
   std::string description;
+  double energy_ev = std::numeric_limits<double>::quiet_NaN();
 };
 
-std::vector<LevelInfo> read_levels(MediumMagboltz& gas) {
-  const int n_levels = gas.GetNumberOfLevels();
+std::vector<LevelInfo> read_level_info(const Config& config,
+                                       MediumMagboltz& gas) {
+  const int n_levels =
+      std::max(0, static_cast<int>(gas.GetNumberOfLevels()));
+
+  // MediumMagboltz::GetLevel returns ngas as the index of the gas in the
+  // active mixture. Components with a zero fraction are not passed to
+  // SetComposition, so map the active Magboltz index back to the original
+  // gas1/gas2 slot used in the configuration.
+  std::vector<int> active_slots;
+  if (config.composition1 > 0.0) active_slots.push_back(0);
+  if (config.composition2 > 0.0) active_slots.push_back(1);
+
   std::vector<LevelInfo> levels;
-  levels.reserve(std::max(0, n_levels));
-  for (int i = 0; i < n_levels; ++i) {
+  levels.reserve(static_cast<std::size_t>(n_levels));
+
+  for (int level = 0; level < n_levels; ++level) {
     LevelInfo info;
-    gas.GetLevel(i, info.gas_index, info.type, info.description, info.energy_ev);
-    levels.push_back(info);
+    info.level = level;
+    gas.GetLevel(static_cast<unsigned int>(level), info.gas_index,
+                 info.process_type, info.description, info.energy_ev);
+
+    // Garfield++ stores ngas as a zero-based index in the active mixture
+    // (m_csType / nCsTypes). Convert it back to the original gas1/gas2 slot.
+    if (info.gas_index >= 0 &&
+        info.gas_index < static_cast<int>(active_slots.size())) {
+      info.component_slot =
+          active_slots[static_cast<std::size_t>(info.gas_index)];
+      info.gas_name = info.component_slot == 0 ? config.gas1 : config.gas2;
+    }
+    levels.push_back(std::move(info));
   }
   return levels;
 }
 
-struct ElectronEnergyReservoir {
-  Long64_t seen = 0;
-  Long64_t maximum = 0;
-  std::vector<float> samples;
-
-  void configure(const Long64_t requested_maximum) {
-    seen = 0;
-    maximum = std::max<Long64_t>(
-        0, std::min<Long64_t>(requested_maximum,
-                              kHardMaxElectronEnergySamples));
-    samples.clear();
-    samples.reserve(static_cast<std::size_t>(maximum));
+Config read_config(int argc, char* argv[]) {
+  if (argc < 19) {
+    throw std::runtime_error(
+        "Usage: ./uniformE output.root mixture field(V/cm) gap(mm) pressure(bar) "
+        "minNpe maxNpe targetRelativeError gas1 comp1 gas2 comp2 heightFactor "
+        "spaceCharge makeGif gifTmax(ns) gifFrames jobId [gifFile] "
+        "[gifMoveIons] [gifIonSpeedCmNs] [recordExcitationPositions] "
+        "[measureGasTransport]");
   }
 
-  void observe(const double energy_ev, const bool hole) {
-    if (hole || maximum <= 0 || !std::isfinite(energy_ev) || energy_ev < 0.0) return;
+  Config c;
+  c.root_file = argv[1];
+  c.mixture_name = argv[2];
+  c.field_v_cm = parse_double(argv[3], "field");
+  c.gap_mm = parse_double(argv[4], "gap");
+  c.pressure_bar = parse_double(argv[5], "pressure");
+  c.min_npe = parse_int(argv[6], "minNpe");
+  c.max_npe = parse_int(argv[7], "maxNpe");
+  c.target_relative_error = parse_double(argv[8], "targetRelativeError");
+  c.gas1 = argv[9];
+  c.composition1 = parse_double(argv[10], "composition1");
+  c.gas2 = argv[11];
+  c.composition2 = parse_double(argv[12], "composition2");
+  c.height_factor = parse_double(argv[13], "heightFactor");
+  c.space_charge = parse_int(argv[14], "spaceCharge") != 0;
+  c.make_gif = parse_int(argv[15], "makeGif") != 0;
+  c.gif_tmax_ns = parse_double(argv[16], "gifTmax");
+  c.gif_frames = parse_int(argv[17], "gifFrames");
+  c.job_id = parse_int(argv[18], "jobId");
+  if (argc > 19) c.gif_file = argv[19];
+  if (argc > 20) c.gif_move_ions = parse_int(argv[20], "gifMoveIons") != 0;
+  if (argc > 21) c.gif_ion_speed_cm_ns = parse_double(argv[21], "gifIonSpeedCmNs");
+  if (argc > 22) {
+    c.record_excitation_positions =
+        parse_int(argv[22], "recordExcitationPositions") != 0;
+  }
+  if (argc > 23) {
+    c.measure_gas_transport =
+        parse_int(argv[23], "measureGasTransport") != 0;
+  }
+
+  if (c.field_v_cm <= 0.0) throw std::runtime_error("field must be positive");
+  if (c.gap_mm <= 0.0) throw std::runtime_error("gap must be positive");
+  if (c.pressure_bar <= 0.0) throw std::runtime_error("pressure must be positive");
+  if (c.min_npe <= 0 || c.max_npe < c.min_npe) {
+    throw std::runtime_error("Require 0 < minNpe <= maxNpe");
+  }
+  if (c.target_relative_error < 0.0) {
+    throw std::runtime_error("targetRelativeError cannot be negative");
+  }
+  if (c.height_factor < 1.0) {
+    throw std::runtime_error("heightFactor must be at least 1");
+  }
+  if (c.composition1 < 0.0 || c.composition2 < 0.0) {
+    throw std::runtime_error("Gas compositions cannot be negative");
+  }
+  if (c.composition1 <= 0.0 && c.composition2 <= 0.0) {
+    throw std::runtime_error("At least one gas composition must be positive");
+  }
+  if (c.gif_ion_speed_cm_ns < 0.0) {
+    throw std::runtime_error("gifIonSpeedCmNs cannot be negative");
+  }
+  if (c.make_gif && c.gif_file.empty()) {
+    c.gif_file = c.root_file + ".gif";
+  }
+  c.gif_frames = std::max(2, std::min(500, c.gif_frames));
+  return c;
+}
+
+// ============================================================================
+//                    Electron-energy distribution
+// ============================================================================
+
+struct EnergyReservoir {
+  Long64_t seen = 0;
+  std::vector<float> values;
+
+  void reset() {
+    seen = 0;
+    values.clear();
+    values.reserve(static_cast<std::size_t>(kMaxEnergySamples));
+  }
+
+  void add(const double energy_ev, const bool hole) {
+    if (hole || !std::isfinite(energy_ev) || energy_ev < 0.0) return;
     ++seen;
-    if (static_cast<Long64_t>(samples.size()) < maximum) {
-      samples.push_back(static_cast<float>(energy_ev));
+
+    if (static_cast<Long64_t>(values.size()) < kMaxEnergySamples) {
+      values.push_back(static_cast<float>(energy_ev));
       return;
     }
 
-    const double u = gRandom != nullptr
-                         ? gRandom->Rndm()
-                         : static_cast<double>(std::rand()) / (RAND_MAX + 1.0);
-    const Long64_t index =
-        static_cast<Long64_t>(std::floor(u * static_cast<double>(seen)));
-    if (index >= 0 && index < maximum) {
-      samples[static_cast<std::size_t>(index)] = static_cast<float>(energy_ev);
+    const Long64_t index = static_cast<Long64_t>(
+        std::floor(gRandom->Rndm() * static_cast<double>(seen)));
+    if (index >= 0 && index < kMaxEnergySamples) {
+      values[static_cast<std::size_t>(index)] = static_cast<float>(energy_ev);
     }
   }
 
-  double sample_or(const double fallback) const {
-    if (samples.empty()) return fallback;
-    const std::size_t index = gRandom != nullptr
-                                  ? static_cast<std::size_t>(gRandom->Integer(samples.size()))
-                                  : static_cast<std::size_t>(std::rand()) % samples.size();
-    return static_cast<double>(samples[index]);
-  }
-
-  void fill_histogram(TH1D& histogram) const {
-    for (const float energy : samples) histogram.Fill(static_cast<double>(energy));
+  double random_energy(const double fallback) const {
+    if (values.empty()) return fallback;
+    return values[static_cast<std::size_t>(gRandom->Integer(values.size()))];
   }
 };
 
-ElectronEnergyReservoir g_energy_reservoir;
+EnergyReservoir g_energy;
 
-void user_handle_step(double, double, double, double, double energy,
-                      double, double, double, bool hole) {
-  g_energy_reservoir.observe(energy, hole);
+void handle_step(double, double, double, double, double energy,
+                 double, double, double, bool hole) {
+  g_energy.add(energy, hole);
 }
 
-struct ExcitationHistogramRecorder {
-  Long64_t excitation_counter = 0;
-  TH1D* levels_histogram = nullptr;
-  TH2I* xy_histogram = nullptr;
-  TH2I* zt_histogram = nullptr;
-  bool collect_ion_positions = false;
+// ============================================================================
+//                  Excitation and ionisation callbacks
+// ============================================================================
 
-  // Space charge still needs the ion creation points during the current
-  // primary avalanche, but they are never persisted to the ROOT file.
-  std::vector<std::array<double, 3>> ion_positions_this_primary;
+struct CollisionRecorder {
+  // Preserve the historical compact output: hLevels stores every real
+  // non-elastic collision term (type != 0). No redundant per-gas or per-type
+  // level histograms are written.
+  TH1D* h_levels = nullptr;
+  TH2I* h_xy = nullptr;
+  TH2I* h_zt = nullptr;
+  const std::vector<LevelInfo>* level_info = nullptr;
+  bool keep_ions = false;
 
-  void connect(TH1D& levels, TH2I& xy, TH2I& zt,
-               const bool keep_ion_positions) {
-    levels_histogram = &levels;
-    xy_histogram = &xy;
-    zt_histogram = &zt;
-    collect_ion_positions = keep_ion_positions;
+  Long64_t n_non_elastic = 0;
+  Long64_t n_non_elastic_gas1 = 0;
+  Long64_t n_non_elastic_gas2 = 0;
+  Long64_t n_inelastic_type3 = 0;
+  Long64_t n_inelastic_type3_gas1 = 0;
+  Long64_t n_inelastic_type3_gas2 = 0;
+  Long64_t n_excitation_type4 = 0;
+  Long64_t n_excitation_type4_gas1 = 0;
+  Long64_t n_excitation_type4_gas2 = 0;
+  Long64_t n_excitation_like = 0;
+  Long64_t n_excitation_like_gas1 = 0;
+  Long64_t n_excitation_like_gas2 = 0;
+  Long64_t n_unassigned_levels = 0;
+  Long64_t n_ionisations = 0;
+  Long64_t n_attachments = 0;
+  Long64_t n_superelastic = 0;
+  std::vector<std::array<double, 4>> ions_this_primary;
+
+  void reset(TH1D& levels,
+             const std::vector<LevelInfo>& levels_info,
+             TH2I* xy, TH2I* zt, const bool store_ions) {
+    h_levels = &levels;
+    h_xy = xy;
+    h_zt = zt;
+    level_info = &levels_info;
+    keep_ions = store_ions;
+
+    n_non_elastic = 0;
+    n_non_elastic_gas1 = 0;
+    n_non_elastic_gas2 = 0;
+    n_inelastic_type3 = 0;
+    n_inelastic_type3_gas1 = 0;
+    n_inelastic_type3_gas2 = 0;
+    n_excitation_type4 = 0;
+    n_excitation_type4_gas1 = 0;
+    n_excitation_type4_gas2 = 0;
+    n_excitation_like = 0;
+    n_excitation_like_gas1 = 0;
+    n_excitation_like_gas2 = 0;
+    n_unassigned_levels = 0;
+    n_ionisations = 0;
+    n_attachments = 0;
+    n_superelastic = 0;
+    ions_this_primary.clear();
   }
 
-  void begin_primary() { ion_positions_this_primary.clear(); }
+  void start_primary() { ions_this_primary.clear(); }
 
-  void observe(const double x, const double y, const double z, const double t,
-               const int process_type, const int h_level) {
-    // Keep ion positions only in memory when space charge is enabled. No ion
-    // propagation and no ion-position output are produced.
-    if (collect_ion_positions && process_type == 1 && std::isfinite(x) &&
-        std::isfinite(y) && std::isfinite(z)) {
-      ion_positions_this_primary.push_back({x, y, z});
+  int component_slot_for_level(const int level) const {
+    if (level < 0 || level_info == nullptr ||
+        level >= static_cast<int>(level_info->size())) {
+      return -1;
+    }
+    return (*level_info)[static_cast<std::size_t>(level)].component_slot;
+  }
+
+  void add(double x, double y, double z, double t, int type, int level) {
+    if (type == kIonisationType) {
+      ++n_ionisations;
+      if (keep_ions && std::isfinite(x) && std::isfinite(y) &&
+          std::isfinite(z)) {
+        ions_this_primary.push_back({x, y, z, t});
+      }
+    } else if (type == kAttachmentType) {
+      ++n_attachments;
+    } else if (type == kSuperelasticType) {
+      ++n_superelastic;
     }
 
-    // Garfield++ uses collision type 4 for electron-impact excitation.
-    if (process_type != kExcitationCollisionType) return;
+    const int component_slot = component_slot_for_level(level);
+    const bool has_level = level >= 0;
 
-    ++excitation_counter;
-    if (levels_histogram != nullptr && h_level >= 0) {
-      levels_histogram->Fill(h_level);
+    // Historical hLevels: every non-elastic real collision with a valid
+    // cross-section term. This intentionally includes ionisation, attachment,
+    // generic inelastic, excitation and super-elastic channels.
+    if (type != kElasticType && has_level) {
+      ++n_non_elastic;
+      if (h_levels != nullptr) h_levels->Fill(level);
+      if (component_slot == 0) {
+        ++n_non_elastic_gas1;
+      } else if (component_slot == 1) {
+        ++n_non_elastic_gas2;
+      } else {
+        ++n_unassigned_levels;
+      }
     }
-    if (xy_histogram != nullptr && std::isfinite(x) && std::isfinite(y)) {
-      xy_histogram->Fill(x, y);
+
+    if (type == kInelasticType && has_level) {
+      ++n_inelastic_type3;
+      if (component_slot == 0) {
+        ++n_inelastic_type3_gas1;
+      } else if (component_slot == 1) {
+        ++n_inelastic_type3_gas2;
+      }
     }
-    if (zt_histogram != nullptr && std::isfinite(z) && std::isfinite(t)) {
-      zt_histogram->Fill(z, t);
+
+    if (type == kExcitationType && has_level) {
+      ++n_excitation_type4;
+      if (component_slot == 0) {
+        ++n_excitation_type4_gas1;
+      } else if (component_slot == 1) {
+        ++n_excitation_type4_gas2;
+      }
+    }
+
+    // Positions used by the photon/scintillation stage include both generic
+    // inelastic molecular channels and discrete excitation channels. This is
+    // essential for CF4, whose relevant channels are not all classified as 4.
+    if ((type == kInelasticType || type == kExcitationType) && has_level) {
+      ++n_excitation_like;
+      if (component_slot == 0) {
+        ++n_excitation_like_gas1;
+      } else if (component_slot == 1) {
+        ++n_excitation_like_gas2;
+      }
+      if (h_xy != nullptr && std::isfinite(x) && std::isfinite(y)) {
+        h_xy->Fill(x, y);
+      }
+      if (h_zt != nullptr && std::isfinite(z) && std::isfinite(t)) {
+        h_zt->Fill(z, t);
+      }
     }
   }
 };
 
-ExcitationHistogramRecorder g_excitation_histograms;
+CollisionRecorder g_collisions;
 
-void user_handle_collision(double x, double y, double z, double t,
-                           int type, int level, Medium*,
-                           double, double, double, double, double,
-                           double, double, double) {
-  g_excitation_histograms.observe(x, y, z, t, type, level);
+void handle_collision(double x, double y, double z, double t,
+                      int type, int level, Medium*,
+                      double, double, double, double, double,
+                      double, double, double) {
+  g_collisions.add(x, y, z, t, type, level);
 }
 
-struct SpaceChargeState {
+// ============================================================================
+//                           Running statistics
+// ============================================================================
+
+struct RunningStatistics {
+  int n = 0;
+  double mean = 0.0;
+  double m2 = 0.0;
+
+  void add(const double value) {
+    ++n;
+    const double delta = value - mean;
+    mean += delta / n;
+    m2 += delta * (value - mean);
+  }
+
+  double standard_deviation() const {
+    return n > 1 ? std::sqrt(m2 / (n - 1)) : 0.0;
+  }
+
+  double error_on_mean() const {
+    return n > 1 ? standard_deviation() / std::sqrt(static_cast<double>(n))
+                 : std::numeric_limits<double>::infinity();
+  }
+
+  double relative_error() const {
+    return mean > 0.0 ? error_on_mean() / mean
+                      : std::numeric_limits<double>::infinity();
+  }
+};
+
+// ============================================================================
+//                         Magboltz gas transport
+// ============================================================================
+
+struct GasTransport {
   bool enabled = false;
-  Long64_t n_ion_rings = 0;
-  std::unique_ptr<ComponentChargedRing> rings;
+  bool has_velocity = false;
+  bool has_diffusion = false;
+  bool has_townsend = false;
+  bool has_attachment = false;
+  double vx_cm_ns = std::numeric_limits<double>::quiet_NaN();
+  double vy_cm_ns = std::numeric_limits<double>::quiet_NaN();
+  double vz_cm_ns = std::numeric_limits<double>::quiet_NaN();
+  double drift_speed_cm_ns = std::numeric_limits<double>::quiet_NaN();
+  double longitudinal_diffusion = std::numeric_limits<double>::quiet_NaN();
+  double transverse_diffusion = std::numeric_limits<double>::quiet_NaN();
+  double townsend_cm_inv = std::numeric_limits<double>::quiet_NaN();
+  double attachment_cm_inv = std::numeric_limits<double>::quiet_NaN();
 
-  void initialise(const SimulationConfig& config, MediumMagboltz& gas) {
-    enabled = config.enable_space_charge;
+  void measure(const Config& config, MediumMagboltz& gas) {
+    enabled = config.measure_gas_transport;
     if (!enabled) return;
 
+    // Initialise() prepares the microscopic collision table used by
+    // AvalancheMicroscopic, but it does not generate the macroscopic transport
+    // table.  Build a tiny three-point grid centred on the exact simulation
+    // field so ElectronVelocity/Townsend/Attachment have real Magboltz data.
+    const double half_width = std::max(1.0, 1.0e-3 * config.field_v_cm);
+    const double field_min = std::max(1.0e-6, config.field_v_cm - half_width);
+    const double field_max = config.field_v_cm + half_width;
+    gas.SetFieldGrid(field_min, field_max, 3, false);
+    std::cout << "[Magboltz] transport table around E = "
+              << config.field_v_cm << " V/cm" << std::endl;
+    gas.GenerateGasTable(3);
+
+    const double ex = 0.0;
+    const double ey = 0.0;
+    const double ez = config.field_v_cm;
+    const double bx = 0.0;
+    const double by = 0.0;
+    const double bz = 0.0;
+
+    has_velocity = gas.ElectronVelocity(
+        ex, ey, ez, bx, by, bz, vx_cm_ns, vy_cm_ns, vz_cm_ns);
+    if (has_velocity) {
+      drift_speed_cm_ns = std::sqrt(
+          vx_cm_ns * vx_cm_ns + vy_cm_ns * vy_cm_ns + vz_cm_ns * vz_cm_ns);
+    }
+
+    has_diffusion = gas.ElectronDiffusion(
+        ex, ey, ez, bx, by, bz, longitudinal_diffusion, transverse_diffusion);
+    has_townsend = gas.ElectronTownsend(
+        ex, ey, ez, bx, by, bz, townsend_cm_inv);
+    has_attachment = gas.ElectronAttachment(
+        ex, ey, ez, bx, by, bz, attachment_cm_inv);
+
+    if (!has_velocity || !has_diffusion || !has_townsend || !has_attachment) {
+      throw std::runtime_error(
+          "Magboltz transport table was generated, but velocity/diffusion/"
+          "Townsend/attachment could not be read at the simulation field.");
+    }
+  }
+};
+
+// ============================================================================
+//                              Space charge
+// ============================================================================
+
+struct SpaceCharge {
+  std::unique_ptr<ComponentChargedRing> rings;
+  Long64_t n_ions = 0;
+
+  void initialise(const Config& config, MediumMagboltz& gas) {
+    if (!config.space_charge) return;
+
     rings = std::make_unique<ComponentChargedRing>();
-    const double transverse_extent = 8.0 * config.sensor_extent_cm();
-    rings->SetArea(-transverse_extent, -transverse_extent, 0.0,
-                   transverse_extent, transverse_extent,
-                   config.sensor_extent_cm());
+    rings->SetArea(-config.xy_half_width_cm(), -config.xy_half_width_cm(), 0.0,
+                   config.xy_half_width_cm(), config.xy_half_width_cm(),
+                   config.z_max_cm());
     rings->SetSpacingTolerance(kSpaceChargeToleranceCm);
     rings->SetMedium(&gas);
     rings->ClearActiveRings();
     rings->UpdateCentre(0.0, 0.0);
   }
 
-  void add_current_primary_ions(const SimulationConfig& config) {
-    if (!enabled || rings == nullptr) return;
-    const double zmax = config.sensor_extent_cm();
-    const double xymax = 8.0 * config.sensor_extent_cm();
-    for (const auto& position : g_excitation_histograms.ion_positions_this_primary) {
-      if (std::abs(position[0]) > xymax || std::abs(position[1]) > xymax ||
-          position[2] < 0.0 || position[2] > zmax) {
+  void add_new_ions(const Config& config) {
+    if (rings == nullptr) return;
+
+    for (const auto& ion : g_collisions.ions_this_primary) {
+      if (std::abs(ion[0]) > config.xy_half_width_cm() ||
+          std::abs(ion[1]) > config.xy_half_width_cm() ||
+          ion[2] < 0.0 || ion[2] > config.z_max_cm()) {
         continue;
       }
-      rings->AddChargedRing(position[0], position[1], position[2], +1.0);
-      ++n_ion_rings;
+      rings->AddChargedRing(ion[0], ion[1], ion[2], +1.0);
+      ++n_ions;
     }
   }
 };
 
-struct PrimaryRow {
-  Int_t ne = 0;
-  Int_t ni = 0;
-  Int_t npe = 0;
+// ============================================================================
+//                                  GIF
+// ============================================================================
+
+struct GifIon {
+  double x = 0.0;
+  double y = 0.0;
+  double z0 = 0.0;
+  double t0 = 0.0;
 };
 
-struct EndpointRow {
-  Int_t status = 0;
+class GifPlotter {
+ public:
+  GifPlotter(const Config& config, Sensor& sensor)
+      : config_(config), sensor_(sensor),
+        canvas_("cGif", "electricUniform avalanche", 1400, 600) {
+    gStyle->SetPalette(kBird);
+    gStyle->SetNumberContours(100);
+
+    canvas_.Divide(2, 1);
+    drift_view_.SetElectronsToFront();
+    drift_view_.SetPlane(0.0, -1.0, 0.0, 0.0, 0.0, 0.0);
+    drift_view_.SetArea(-config_.xy_half_width_cm(), 0.0,
+                         config_.xy_half_width_cm(), config_.gap_cm());
+    drift_view_.SetCanvas(static_cast<TPad*>(canvas_.cd(1)));
+
+    label_.SetTextSize(0.040);
+    label_.SetTextFont(42);
+  }
+
+  void connect(AvalancheMicroscopic& avalanche) {
+    avalanche.EnableExcitationMarkers(false);
+    avalanche.EnableIonisationMarkers(false);
+    avalanche.EnableAttachmentMarkers(false);
+    avalanche.EnablePlotting(&drift_view_);
+  }
+
+  void clear() { drift_view_.Clear(); }
+
+  void draw_frame(const int frame, const double time_ns,
+                  const SpaceCharge& space_charge,
+                  const std::vector<std::array<double, 3>>& ion_positions,
+                  const bool last_frame) {
+    draw_drift_panel(frame, time_ns, ion_positions);
+    draw_field_panel(time_ns, space_charge);
+
+    canvas_.Modified();
+    canvas_.Update();
+    gSystem->ProcessEvents();
+
+    const std::string suffix = last_frame ? "++" : "+3";
+    canvas_.Print((config_.gif_file + suffix).c_str());
+  }
+
+ private:
+  void prepare_pad(TPad* pad, const bool colour_bar) {
+    if (pad == nullptr) return;
+    pad->SetLeftMargin(0.14);
+    pad->SetBottomMargin(0.13);
+    pad->SetTopMargin(0.06);
+    pad->SetRightMargin(colour_bar ? 0.20 : 0.05);
+    pad->SetGridx(true);
+    pad->SetGridy(true);
+    pad->SetTicks(1, 1);
+  }
+
+  void draw_drift_panel(const int frame, const double time_ns,
+                        const std::vector<std::array<double, 3>>& ion_positions) {
+    TPad* pad = static_cast<TPad*>(canvas_.cd(1));
+    prepare_pad(pad, false);
+
+    drift_view_.SetArea(-config_.xy_half_width_cm(), 0.0,
+                         config_.xy_half_width_cm(), config_.gap_cm());
+    drift_view_.Plot2d(true, true);
+
+    ion_markers_.reset();
+    if (!ion_positions.empty()) {
+      ion_markers_ = std::make_unique<TGraph>();
+      int point = 0;
+      for (const auto& ion : ion_positions) {
+        if (std::abs(ion[0]) > config_.xy_half_width_cm()) continue;
+        if (ion[2] < 0.0 || ion[2] > config_.gap_cm()) continue;
+        ion_markers_->SetPoint(point++, ion[0], ion[2]);
+      }
+      if (point > 0) {
+        ion_markers_->SetMarkerStyle(20);
+        ion_markers_->SetMarkerSize(0.45);
+        ion_markers_->SetMarkerColor(kBlue + 2);
+        ion_markers_->Draw("P SAME");
+      }
+    }
+
+    char text[128];
+    std::snprintf(text, sizeof(text), "#it{t} = %.4g ns", time_ns);
+    label_.DrawLatexNDC(0.06, 0.90, text);
+    std::snprintf(text, sizeof(text), "Frame %d", frame);
+    label_.DrawLatexNDC(0.06, 0.82, text);
+  }
+
+  void draw_field_panel(const double time_ns, const SpaceCharge& space_charge) {
+    TPad* pad = static_cast<TPad*>(canvas_.cd(2));
+    pad->Clear();
+    prepare_pad(pad, true);
+
+    constexpr int n_x = 160;
+    constexpr int n_z = 160;
+    field_map_ = std::make_unique<TH2D>(
+        "hGifField", "", n_x,
+        -config_.xy_half_width_cm(), config_.xy_half_width_cm(),
+        n_z, 0.0, config_.gap_cm());
+    field_map_->SetDirectory(nullptr);
+    field_map_->SetStats(false);
+    field_map_->GetXaxis()->SetTitle("x [cm]");
+    field_map_->GetYaxis()->SetTitle("z [cm]");
+
+    const bool show_space_charge =
+        config_.space_charge && space_charge.rings != nullptr &&
+        space_charge.rings->GetNumberOfRings() > 0;
+
+    double minimum = std::numeric_limits<double>::infinity();
+    double maximum = -std::numeric_limits<double>::infinity();
+
+    for (int ix = 1; ix <= n_x; ++ix) {
+      const double x = field_map_->GetXaxis()->GetBinCenter(ix);
+
+      if (!show_space_charge) {
+        for (int iz = 1; iz <= n_z; ++iz) {
+          const double z = field_map_->GetYaxis()->GetBinCenter(iz);
+          const double value = -config_.field_v_cm * z;
+          field_map_->SetBinContent(ix, iz, value);
+          minimum = std::min(minimum, value);
+          maximum = std::max(maximum, value);
+        }
+        continue;
+      }
+
+      // ComponentChargedRing provides the electric field reliably, but its
+      // potential output is not suitable for this live map. Reconstruct the
+      // space-charge potential from the longitudinal field instead:
+      //
+      //   Delta V_SC(x,z) = - integral_0^z E_z,SC(x,z') dz'.
+      //
+      // E is in V/cm and z in cm, so the integral is directly in volts.
+      auto sample_ez_sc = [&](const double z) {
+        double ex = 0.0;
+        double ey = 0.0;
+        double ez = 0.0;
+        double potential = 0.0;
+        int status = 0;
+        Medium* medium = nullptr;
+        space_charge.rings->ElectricField(
+            x, 0.0, z, ex, ey, ez, potential, medium, status);
+        return std::isfinite(ez) ? ez : 0.0;
+      };
+
+      double z_previous = 0.0;
+      double ez_previous = sample_ez_sc(z_previous);
+      double delta_v = 0.0;
+
+      for (int iz = 1; iz <= n_z; ++iz) {
+        const double z = field_map_->GetYaxis()->GetBinCenter(iz);
+        const double ez = sample_ez_sc(z);
+        delta_v += -0.5 * (ez_previous + ez) * (z - z_previous);
+
+        field_map_->SetBinContent(ix, iz, delta_v);
+        minimum = std::min(minimum, delta_v);
+        maximum = std::max(maximum, delta_v);
+
+        z_previous = z;
+        ez_previous = ez;
+      }
+    }
+
+    if (!std::isfinite(minimum) || !std::isfinite(maximum) ||
+        std::abs(maximum - minimum) < 1.0e-15) {
+      const double scale = show_space_charge ? 1.0e-12 : 1.0;
+      minimum = -scale;
+      maximum = scale;
+    }
+
+    if (show_space_charge) {
+      const double symmetric = std::max(std::abs(minimum), std::abs(maximum));
+      field_map_->SetMinimum(-symmetric);
+      field_map_->SetMaximum(+symmetric);
+      field_map_->GetZaxis()->SetTitle("#Delta V_{SC}(z,t) [V]");
+    } else {
+      field_map_->SetMinimum(-config_.field_v_cm * config_.gap_cm());
+      field_map_->SetMaximum(0.0);
+      field_map_->GetZaxis()->SetTitle("V_{0}(z) [V]");
+    }
+
+    field_map_->GetZaxis()->SetTitleOffset(1.25);
+    field_map_->SetContour(100);
+    field_map_->Draw("COLZ");
+
+    char text[128];
+    std::snprintf(text, sizeof(text), "#it{t} = %.4g ns", time_ns);
+    label_.DrawLatexNDC(0.06, 0.90, text);
+    label_.DrawLatexNDC(
+        0.06, 0.82,
+        show_space_charge ? "#Delta V_{SC}(x,z) [V]" : "V_{0}(z) [V]");
+  }
+
+  const Config& config_;
+  Sensor& sensor_;
+  TCanvas canvas_;
+  ViewDrift drift_view_;
+  TLatex label_;
+  std::unique_ptr<TH2D> field_map_;
+  std::unique_ptr<TGraph> ion_markers_;
 };
 
-struct RunSummary {
-  Long64_t ne_total = 0;
-  Long64_t ni_total = 0;
-  double ne_mean = quiet_nan();
-  double ni_mean = quiet_nan();
-  double gain_sim = quiet_nan();
-  double alpha_eff = quiet_nan();
-  double alpha_from_ne = quiet_nan();
-  double alpha_from_ni = quiet_nan();
-  double vz = quiet_nan();
-  bool valid_for_alpha = false;
-  std::string alpha_source = "simulation_npe";
-};
+void rebuild_live_space_charge(
+    const Config& config, SpaceCharge& space_charge,
+    const AvalancheMicroscopic& avalanche,
+    const std::vector<std::array<double, 3>>& ion_positions) {
+  if (space_charge.rings == nullptr) return;
 
-void write_progress(const int job_id, const int current, const int total) {
-  std::cout << "PROGRESS " << job_id << " " << current << " " << total
-            << std::endl;
-}
+  space_charge.rings->ClearActiveRings();
+  space_charge.rings->UpdateCentre(0.0, 0.0);
+  space_charge.n_ions = 0;
 
-std::string gif_frame_filename(const std::string& gif_file,
-                               const bool final_frame) {
-  return gif_file + (final_frame ? "++" : "+" + std::to_string(kGifDelay));
-}
+  // Positive ions use their current visual positions.
+  for (const auto& ion : ion_positions) {
+    if (std::abs(ion[0]) > config.xy_half_width_cm() ||
+        std::abs(ion[1]) > config.xy_half_width_cm() ||
+        ion[2] < 0.0 || ion[2] > config.gap_cm()) {
+      continue;
+    }
+    space_charge.rings->AddChargedRing(ion[0], ion[1], ion[2], +1.0);
+    ++space_charge.n_ions;
+  }
 
-void write_avalanche_gif(const AvalancheMicroscopic& avalanche,
-                         const SimulationConfig& config) {
-  if (!config.make_gif || config.gif_file.empty()) return;
-
-  struct GifPoint {
-    double x = 0.0;
-    double z = 0.0;
-    double t = 0.0;
-  };
-
-  std::vector<std::vector<GifPoint>> tracks;
-  double tmin = std::numeric_limits<double>::infinity();
-  double tmax = -std::numeric_limits<double>::infinity();
-
+  // Electrons still inside the multiplication gap contribute negative charge.
   for (const auto& electron : avalanche.GetElectrons()) {
     if (electron.path.empty()) continue;
-    std::vector<GifPoint> track;
-    track.reserve(electron.path.size());
-    for (const auto& point : electron.path) {
-      if (!std::isfinite(point.x) || !std::isfinite(point.z) ||
-          !std::isfinite(point.t)) {
-        continue;
-      }
-      track.push_back({point.x, point.z, point.t});
-      tmin = std::min(tmin, point.t);
-      tmax = std::max(tmax, point.t);
+    const auto& point = electron.path.back();
+    if (std::abs(point.x) > config.xy_half_width_cm() ||
+        std::abs(point.y) > config.xy_half_width_cm() ||
+        point.z <= kSpaceChargeToleranceCm ||
+        point.z >= config.gap_cm() - kSpaceChargeToleranceCm) {
+      continue;
     }
-    if (!track.empty()) tracks.push_back(std::move(track));
+    space_charge.rings->AddChargedRing(point.x, point.y, point.z, -1.0);
   }
+}
 
-  if (tracks.empty() || !std::isfinite(tmin) || !std::isfinite(tmax)) {
-    std::cerr << "[GIF] No stored drift-line points; GIF was not created.\n";
-    return;
-  }
+void run_live_gif(AvalancheMicroscopic& avalanche, Sensor& sensor,
+                  const Config& config, SpaceCharge& space_charge,
+                  const double x0, const double y0, const double z0,
+                  const double t0, const double e0,
+                  const double dx0, const double dy0, const double dz0) {
+  if (!config.make_gif || config.gif_file.empty()) return;
 
-  gROOT->SetBatch(kTRUE);
   gSystem->Unlink(config.gif_file.c_str());
 
-  const int nframes = std::max(
-      2, std::min(kGifMaxFrames,
-                  static_cast<int>(std::ceil(std::max(1.0, 20.0 * (tmax - tmin))))));
-  const double xlim = std::max(config.gap_cm(), config.sensor_extent_cm());
-  const double zlim = std::max(config.gap_cm(), config.sensor_extent_cm());
+  GifPlotter plotter(config, sensor);
+  plotter.connect(avalanche);
+  avalanche.AddElectron(x0, y0, z0, t0, e0, dx0, dy0, dz0);
 
-  TCanvas canvas("electricUniformGifCanvas", "electricUniform avalanche", 900, 700);
-  TH2D frame_axis("electricUniformGifAxes",
-                  "Microscopic avalanche;x [cm];z [cm]",
-                  10, -xlim, xlim, 10, 0.0, zlim);
-  frame_axis.SetStats(false);
-  frame_axis.SetDirectory(nullptr);
-  TLatex label;
-  label.SetNDC(true);
-  label.SetTextSize(0.04);
+  const double tmax = std::max(1.0e-9, config.gif_tmax_ns);
+  const double dt = tmax / std::max(1, config.gif_frames);
+  std::size_t processed_ions = 0;
+  std::vector<GifIon> ions;
 
-  for (int iframe = 0; iframe < nframes; ++iframe) {
-    const double fraction = nframes > 1
-                                ? static_cast<double>(iframe) / (nframes - 1)
-                                : 1.0;
-    const double frame_time = tmin + fraction * (tmax - tmin);
+  for (int frame = 0; frame < config.gif_frames; ++frame) {
+    const double time_min = frame * dt;
+    const double time_max = (frame + 1) * dt;
 
-    canvas.cd();
-    canvas.Clear();
-    frame_axis.Draw("AXIS");
+    plotter.clear();
+    avalanche.SetTimeWindow(time_min, time_max);
+    avalanche.ResumeAvalanche();
 
-    TLine anode(-xlim, 0.0, xlim, 0.0);
-    TLine cathode(-xlim, config.gap_cm(), xlim, config.gap_cm());
-    anode.Draw("SAME");
-    cathode.Draw("SAME");
-
-    std::vector<std::unique_ptr<TGraph>> graphs;
-    graphs.reserve(tracks.size());
-    for (const auto& track : tracks) {
-      auto graph = std::make_unique<TGraph>();
-      int point_index = 0;
-      for (const auto& point : track) {
-        if (point.t > frame_time) break;
-        graph->SetPoint(point_index++, point.x, point.z);
-      }
-      if (point_index > 0) graph->Draw("L SAME");
-      graphs.push_back(std::move(graph));
+    while (processed_ions < g_collisions.ions_this_primary.size()) {
+      const auto& ion = g_collisions.ions_this_primary[processed_ions++];
+      ions.push_back({ion[0], ion[1], ion[2], ion[3]});
     }
 
-    char time_text[128];
-    std::snprintf(time_text, sizeof(time_text), "#it{t} = %.5g ns", frame_time);
-    label.DrawLatex(0.17, 0.90, time_text);
+    std::vector<std::array<double, 3>> ion_positions;
+    ion_positions.reserve(ions.size());
+    for (const GifIon& ion : ions) {
+      double z = ion.z0;
+      if (config.gif_move_ions && time_max > ion.t0) {
+        z += config.gif_ion_speed_cm_ns * (time_max - ion.t0);
+      }
+      z = std::clamp(z, 0.0, config.gap_cm());
+      ion_positions.push_back({ion.x, ion.y, z});
+    }
 
-    canvas.Modified();
-    canvas.Update();
-    canvas.Print(gif_frame_filename(config.gif_file, iframe + 1 == nframes).c_str());
+    rebuild_live_space_charge(config, space_charge, avalanche, ion_positions);
+    plotter.draw_frame(frame, time_max, space_charge, ion_positions,
+                       frame + 1 == config.gif_frames);
   }
-
-  std::cout << "[GIF] Guardado en: " << config.gif_file << "\n";
 }
 
 }  // namespace
@@ -466,65 +857,84 @@ int main(int argc, char* argv[]) {
   try {
     const std::time_t wall_start = std::time(nullptr);
     const std::clock_t cpu_start = std::clock();
+    Config config = read_config(argc, argv);
 
-    SimulationConfig config = parse_arguments(argc, argv);
-
-    std::cout << std::setprecision(8)
-              << "SetComposition: " << config.gas1 << "/" << config.gas2
-              << " = " << config.composition1 << "/" << config.composition2 << "\n"
-              << "[CONFIG] spaceCharge=" << (config.enable_space_charge ? 1 : 0)
-              << ", makeGif=" << (config.make_gif ? 1 : 0)
-              << ", maxEEDInputs=" << config.max_electron_energy_samples << "\n"
-              << "[CONFIG] excitation output = hExcXY + hExcZT ("
-              << kExcitationXYBins << "x" << kExcitationXYBins << ", "
-              << kExcitationZBins << "x" << kExcitationTimeBins << ")\n";
-
-    auto gas = std::make_unique<MediumMagboltz>();
-    if (config.composition2 <= 0.0) {
-      gas->SetComposition(config.gas1, config.composition1);
-    } else {
-      gas->SetComposition(config.gas1, config.composition1,
-                          config.gas2, config.composition2);
+    std::unique_ptr<TApplication> application;
+    if (config.make_gif) {
+      int root_argc = 1;
+      char application_name[] = "uniformE";
+      char* root_argv[] = {application_name, nullptr};
+      application = std::make_unique<TApplication>(
+          "electricUniform", &root_argc, root_argv);
+      gROOT->SetBatch(kFALSE);
     }
-    gas->SetTemperature(config.temperature_k);
-    gas->SetPressure(config.pressure_torr());
-    gas->SetMaxElectronEnergy(config.max_electron_energy_ev);
-    gas->EnableDebugging();
-    gas->PrintGas();
-    gas->Initialise();
-    gas->DisableDebugging();
 
-    const std::vector<LevelInfo> levels = read_levels(*gas);
-    std::cout << "# of levels: " << levels.size() << "\n";
+    // ========================================================================
+    //                              Setup gas
+    // ========================================================================
 
-    auto field_component = std::make_unique<ComponentUser>();
-    const double uniform_e = config.electric_field_v_cm;
-    field_component->SetElectricField(
-        [uniform_e](double, double, double, double& ex, double& ey, double& ez) {
+    MediumMagboltz gas;
+    if (config.composition1 > 0.0 && config.composition2 > 0.0) {
+      gas.SetComposition(config.gas1, config.composition1,
+                         config.gas2, config.composition2);
+    } else if (config.composition1 > 0.0) {
+      gas.SetComposition(config.gas1, config.composition1);
+    } else {
+      gas.SetComposition(config.gas2, config.composition2);
+    }
+
+    gas.SetTemperature(config.temperature_k);
+    gas.SetPressure(config.pressure_torr());
+    gas.SetMaxElectronEnergy(config.max_electron_energy_ev);
+    gas.Initialise();
+
+    GasTransport gas_transport;
+    gas_transport.measure(config, gas);
+
+    const std::vector<LevelInfo> level_info = read_level_info(config, gas);
+    const int n_levels =
+        std::max(1, static_cast<int>(level_info.size()));
+
+    // ========================================================================
+    //                   Geometry and uniform electric field
+    // ========================================================================
+
+    // The physical multiplication distance is always gap.
+    // The electron starts at z = gap and drifts towards the anode at z = 0.
+    // heightFactor only adds free space above the launch plane.
+
+    ComponentUser field;
+    const double uniform_field = config.field_v_cm;
+    field.SetElectricField(
+        [uniform_field](double, double, double,
+                        double& ex, double& ey, double& ez) {
           ex = 0.0;
           ey = 0.0;
-          ez = uniform_e;
+          ez = uniform_field;
         });
-    field_component->SetArea(-8.0 * config.sensor_extent_cm(),
-                             -8.0 * config.sensor_extent_cm(), 0.0,
-                             8.0 * config.sensor_extent_cm(),
-                             8.0 * config.sensor_extent_cm(),
-                             config.component_zmax_cm());
-    field_component->SetMedium(gas.get());
+    field.SetArea(-config.xy_half_width_cm(), -config.xy_half_width_cm(), 0.0,
+                  config.xy_half_width_cm(), config.xy_half_width_cm(),
+                  config.z_max_cm());
+    field.SetMedium(&gas);
 
-    SpaceChargeState space_charge;
-    space_charge.initialise(config, *gas);
+    SpaceCharge space_charge;
+    space_charge.initialise(config, gas);
 
-    auto sensor = std::make_unique<Sensor>();
-    sensor->AddComponent(field_component.get());
-    if (space_charge.enabled && space_charge.rings != nullptr) {
-      sensor->AddComponent(space_charge.rings.get());
+    Sensor sensor;
+    sensor.AddComponent(&field);
+    if (space_charge.rings != nullptr) sensor.AddComponent(space_charge.rings.get());
+    sensor.SetArea(-config.xy_half_width_cm(), -config.xy_half_width_cm(), 0.0,
+                   config.xy_half_width_cm(), config.xy_half_width_cm(),
+                   config.z_max_cm());
+
+    // ========================================================================
+    //                              ROOT output
+    // ========================================================================
+
+    const std::filesystem::path output_path(config.root_file);
+    if (!output_path.parent_path().empty()) {
+      std::filesystem::create_directories(output_path.parent_path());
     }
-    sensor->SetArea(-8.0 * config.sensor_extent_cm(),
-                    -8.0 * config.sensor_extent_cm(), 0.0,
-                    8.0 * config.sensor_extent_cm(),
-                    8.0 * config.sensor_extent_cm(),
-                    config.sensor_extent_cm());
 
     TFile output(config.root_file.c_str(), "RECREATE");
     if (output.IsZombie()) {
@@ -534,205 +944,286 @@ int main(int argc, char* argv[]) {
     TH1D h_electron_energy(
         "hElectronEnergyDistribution",
         "Electron energy distribution from null-collision steps;E_{e} [eV];samples",
-        config.electron_energy_bins, 0.0, 50.0);
-    TH1D h_levels("hLevels", "Electron-impact excitation levels;hLevel;excitations",
-                  std::max(1, static_cast<int>(levels.size())), 0.0,
-                  static_cast<double>(std::max(1, static_cast<int>(levels.size()))));
+        kEnergyBins, 0.0, 50.0);
+    // hLevels keeps the historical meaning used by the previous pipeline:
+    // every real non-elastic collision term (types 1--5). This is the only
+    // level histogram written to the ROOT file.
+    TH1D h_levels(
+        "hLevels", "Excitation Distribution;hLevel;excitations",
+        n_levels, 0.0, static_cast<double>(n_levels));
+    std::unique_ptr<TH2I> h_exc_xy;
+    std::unique_ptr<TH2I> h_exc_zt;
+    if (config.record_excitation_positions) {
+      h_exc_xy = std::make_unique<TH2I>(
+          "hExcXY", "Inelastic/excitation transverse distribution;x [cm];y [cm]",
+          kExcitationBins, -config.xy_half_width_cm(), config.xy_half_width_cm(),
+          kExcitationBins, -config.xy_half_width_cm(), config.xy_half_width_cm());
+      h_exc_zt = std::make_unique<TH2I>(
+          "hExcZT", "Inelastic/excitation longitudinal-time distribution;z [cm];t [ns]",
+          kExcitationBins, 0.0, config.z_max_cm(),
+          kExcitationBins, 0.0, kInitialTimeRangeNs);
+      h_exc_zt->SetCanExtend(TH1::kYaxis);
+    }
 
-    const double transverse_extent = 8.0 * config.sensor_extent_cm();
-    TH2I h_exc_xy(
-        "hExcXY", "Excitation transverse distribution;x [cm];y [cm]",
-        kExcitationXYBins, -transverse_extent, transverse_extent,
-        kExcitationXYBins, -transverse_extent, transverse_extent);
-    TH2I h_exc_zt(
-        "hExcZT", "Excitation longitudinal-time distribution;z [cm];t [ns]",
-        kExcitationZBins, 0.0, config.sensor_extent_cm(),
-        kExcitationTimeBins, 0.0, kInitialExcitationTimeMaxNs);
-    // The number of bins stays fixed. ROOT enlarges the time range only if an
-    // excitation falls outside it, keeping file size bounded.
-    h_exc_zt.SetCanExtend(TH1::kYaxis);
-
-    TTree data_per_primary("dataPerPrimaryElectron",
-                           "Data per primary electron");
+    TTree data_per_primary("dataPerPrimaryElectron", "Data per primary electron");
     TTree data_per_electron("dataPerElectron", "Data per electron endpoint");
     TTree gas_data("gasData", "Gas configuration and avalanche summary");
+    Int_t ne = 0;
+    Int_t ni = 0;
+    Int_t one_primary = 1;
+    Int_t endpoint_status = 0;
 
-    PrimaryRow primary_row;
-    data_per_primary.Branch("ne", &primary_row.ne, "ne/I");
-    data_per_primary.Branch("ni", &primary_row.ni, "ni/I");
-    data_per_primary.Branch("npe", &primary_row.npe, "npe/I");
+    data_per_primary.Branch("ne", &ne, "ne/I");
+    data_per_primary.Branch("ni", &ni, "ni/I");
+    data_per_primary.Branch("npe", &one_primary, "npe/I");
+    data_per_electron.Branch("status", &endpoint_status, "status/I");
 
-    EndpointRow endpoint_row;
-    data_per_electron.Branch("status", &endpoint_row.status, "status/I");
+    // ========================================================================
+    //                         Microscopic avalanche
+    // ========================================================================
 
-    g_excitation_histograms.connect(
-        h_levels, h_exc_xy, h_exc_zt, config.enable_space_charge);
-    g_energy_reservoir.configure(config.max_electron_energy_samples);
+    g_energy.reset();
+    g_collisions.reset(
+        h_levels, level_info, h_exc_xy.get(), h_exc_zt.get(),
+        config.space_charge || config.make_gif);
 
-    RunSummary summary;
-    double pressure_torr = config.pressure_torr();
-    int npe_for_tree = config.npe;
-    Long64_t eed_samples_seen = 0;
-    Long64_t eed_samples_stored = 0;
-    Long64_t n_excitations = 0;
-    bool space_charge_enabled = config.enable_space_charge;
-    bool gif_enabled = config.make_gif;
+    AvalancheMicroscopic avalanche;
+    avalanche.SetSensor(&sensor);
+    avalanche.EnableSignalCalculation(false);
+    avalanche.EnableNullCollisionSteps(true, 1);
+    avalanche.SetUserHandleStep(handle_step);
+    avalanche.SetUserHandleCollision(handle_collision);
+    if (config.make_gif) avalanche.EnableDriftLines(true);
 
-    gas_data.Branch("electricField", &config.electric_field_v_cm, "electricField/D");
-    gas_data.Branch("gap_mm", &config.gap_mm, "gap_mm/D");
-    gas_data.Branch("pressure", &pressure_torr, "pressure/D");
-    gas_data.Branch("pressureBar", &config.pressure_bar, "pressureBar/D");
-    gas_data.Branch("temp", &config.temperature_k, "temp/D");
-    gas_data.Branch("gas1", &config.gas1);
-    gas_data.Branch("composition1", &config.composition1, "composition1/D");
-    gas_data.Branch("gas2", &config.gas2);
-    gas_data.Branch("composition2", &config.composition2, "composition2/D");
-    gas_data.Branch("height", &config.height, "height/D");
-    gas_data.Branch("npe", &npe_for_tree, "npe/I");
-    gas_data.Branch("neTotal", &summary.ne_total, "neTotal/L");
-    gas_data.Branch("niTotal", &summary.ni_total, "niTotal/L");
-    gas_data.Branch("neMean", &summary.ne_mean, "neMean/D");
-    gas_data.Branch("niMean", &summary.ni_mean, "niMean/D");
-    gas_data.Branch("gainSim", &summary.gain_sim, "gainSim/D");
-    gas_data.Branch("alphaEff", &summary.alpha_eff, "alphaEff/D");
-    gas_data.Branch("alphaFromNe", &summary.alpha_from_ne, "alphaFromNe/D");
-    gas_data.Branch("alphaFromNi", &summary.alpha_from_ni, "alphaFromNi/D");
-    gas_data.Branch("vz", &summary.vz, "vz/D");
-    gas_data.Branch("validForAlpha", &summary.valid_for_alpha, "validForAlpha/O");
-    gas_data.Branch("alphaSource", &summary.alpha_source);
-    gas_data.Branch("spaceChargeEnabled", &space_charge_enabled,
-                    "spaceChargeEnabled/O");
-    gas_data.Branch("nSpaceChargeIons", &space_charge.n_ion_rings,
-                    "nSpaceChargeIons/L");
-    gas_data.Branch("gifEnabled", &gif_enabled, "gifEnabled/O");
-    gas_data.Branch("electronEnergySamplesSeen", &eed_samples_seen,
-                    "electronEnergySamplesSeen/L");
-    gas_data.Branch("electronEnergySamplesStored", &eed_samples_stored,
-                    "electronEnergySamplesStored/L");
-    gas_data.Branch("nExcitations", &n_excitations, "nExcitations/L");
+    RunningStatistics electron_statistics;
+    RunningStatistics ion_statistics;
+    Long64_t ne_total = 0;
+    Long64_t ni_total = 0;
 
-    auto avalanche = std::make_unique<AvalancheMicroscopic>();
-    avalanche->SetSensor(sensor.get());
-    avalanche->EnableSignalCalculation(false);
-    avalanche->EnableNullCollisionSteps(true, 1);
-    avalanche->SetUserHandleStep(user_handle_step);
-    avalanche->SetUserHandleCollision(user_handle_collision);
-    if (config.make_gif) avalanche->EnableDriftLines(true);
+    for (int event = 0; event < config.max_npe; ++event) {
+      g_collisions.start_primary();
 
-    for (int event_number = 0; event_number < config.npe; ++event_number) {
-      g_excitation_histograms.begin_primary();
-
-      double x0 = gRandom->Uniform(-config.sensor_extent_cm(),
-                                   config.sensor_extent_cm());
-      double y0 = gRandom->Uniform(-config.sensor_extent_cm(),
-                                   config.sensor_extent_cm());
-      const double z0 = config.gap_cm();
+      double x0 = gRandom->Uniform(-config.gap_cm(), config.gap_cm());
+      double y0 = gRandom->Uniform(-config.gap_cm(), config.gap_cm());
+      const double z0 = config.launch_z_cm();
       const double t0 = 0.0;
-      const double e0 = event_number == 0
+      const double e0 = event == 0
                             ? config.initial_energy_ev
-                            : g_energy_reservoir.sample_or(config.initial_energy_ev);
+                            : g_energy.random_energy(config.initial_energy_ev);
 
-      const double phi0 = gRandom->Uniform(0.0, 2.0 * TMath::Pi());
-      // Preserve the original electricUniform launch direction (3 pi / 4).
-      const double theta0 = 0.75 * TMath::Pi();
-      const double dx0 = TMath::Cos(phi0) * TMath::Sin(theta0);
-      const double dy0 = TMath::Sin(phi0) * TMath::Sin(theta0);
-      const double dz0 = TMath::Cos(theta0);
-
-      if (config.make_gif && event_number == 0) {
+      if (config.make_gif && event == 0) {
         x0 = 0.0;
         y0 = 0.0;
       }
 
-      avalanche->AvalancheElectron(x0, y0, z0, t0, e0, dx0, dy0, dz0);
-      avalanche->GetAvalancheSize(primary_row.ne, primary_row.ni);
-      primary_row.npe = 1;
-      summary.ne_total += primary_row.ne;
-      summary.ni_total += primary_row.ni;
+      const double phi = gRandom->Uniform(0.0, 2.0 * TMath::Pi());
+      const double theta = 0.75 * TMath::Pi();
+      const double dx = TMath::Cos(phi) * TMath::Sin(theta);
+      const double dy = TMath::Sin(phi) * TMath::Sin(theta);
+      const double dz = TMath::Cos(theta);
+
+      if (config.make_gif && event == 0) {
+        run_live_gif(avalanche, sensor, config, space_charge,
+                     x0, y0, z0, t0, e0, dx, dy, dz);
+      } else {
+        avalanche.AvalancheElectron(x0, y0, z0, t0, e0, dx, dy, dz);
+      }
+      avalanche.GetAvalancheSize(ne, ni);
+
+      ne_total += ne;
+      ni_total += ni;
+      electron_statistics.add(ne);
+      ion_statistics.add(ni);
       data_per_primary.Fill();
 
-      for (int electron = 0; electron < primary_row.ne; ++electron) {
+      for (int electron = 0; electron < ne; ++electron) {
         double ex0 = 0.0, ey0 = 0.0, ez0 = 0.0, et0 = 0.0, ee0 = 0.0;
         double ex1 = 0.0, ey1 = 0.0, ez1 = 0.0, et1 = 0.0, ee1 = 0.0;
-        avalanche->GetElectronEndpoint(electron,
-                                       ex0, ey0, ez0, et0, ee0,
-                                       ex1, ey1, ez1, et1, ee1,
-                                       endpoint_row.status);
+        avalanche.GetElectronEndpoint(
+            electron, ex0, ey0, ez0, et0, ee0,
+            ex1, ey1, ez1, et1, ee1, endpoint_status);
         data_per_electron.Fill();
       }
 
-      // The new ions affect subsequent primary avalanches, not the avalanche in
-      // which they were created. No ion propagation is performed or written.
-      space_charge.add_current_primary_ions(config);
-
-      if (config.make_gif && event_number == 0) {
-        write_avalanche_gif(*avalanche, config);
+      // The live GIF already rebuilt the charged-ring component frame by
+      // frame for the first primary. Avoid adding the same ions twice.
+      if (!(config.make_gif && event == 0)) {
+        space_charge.add_new_ions(config);
       }
 
-      write_progress(config.job_id, event_number + 1, config.npe);
+      const int completed = event + 1;
+      const int progress_step = std::max(1, config.max_npe / 50);
+      if (completed == 1 || completed == config.max_npe ||
+          completed % progress_step == 0) {
+        std::cout << "PROGRESS " << config.job_id << " " << completed << " "
+                  << config.max_npe << std::endl;
+      }
+
+      const bool enough_primaries = completed >= config.min_npe;
+      const bool precision_reached =
+          config.target_relative_error > 0.0 && enough_primaries &&
+          electron_statistics.relative_error() <= config.target_relative_error;
+      if (precision_reached) break;
     }
 
-    if (config.npe > 0) {
-      summary.ne_mean = static_cast<double>(summary.ne_total) / config.npe;
-      summary.ni_mean = static_cast<double>(summary.ni_total) / config.npe;
-      summary.gain_sim = summary.ne_mean;
-    }
+    // ========================================================================
+    //                       Gain and effective alpha
+    // ========================================================================
 
+    int actual_npe = electron_statistics.n;
+    double gain = electron_statistics.mean;
+    double gain_error = electron_statistics.error_on_mean();
+    double ni_mean = ion_statistics.mean;
     const double gap_cm = config.gap_cm();
-    if (std::isfinite(summary.gain_sim) && summary.gain_sim > 0.0 && gap_cm > 0.0) {
-      summary.alpha_from_ne = std::log(summary.gain_sim) / gap_cm;
-      summary.alpha_eff = summary.alpha_from_ne;
-    }
-    if (std::isfinite(summary.ni_mean) && gap_cm > 0.0) {
-      summary.alpha_from_ni = summary.ni_mean / gap_cm;
-    }
 
-    summary.valid_for_alpha =
-        config.npe > 100 && std::isfinite(summary.alpha_eff) && summary.alpha_eff > 0.0;
-    if (!summary.valid_for_alpha) {
-      summary.alpha_eff = quiet_nan();
-      summary.alpha_from_ne = quiet_nan();
-      summary.alpha_from_ni = quiet_nan();
+    double alpha_effective = std::numeric_limits<double>::quiet_NaN();
+    double alpha_error = std::numeric_limits<double>::quiet_NaN();
+    bool valid_for_alpha = false;
+
+    if (gain > 1.0 && gap_cm > 0.0) {
+      alpha_effective = std::log(gain) / gap_cm;
+      if (std::isfinite(gain_error)) {
+        alpha_error = gain_error / (gain * gap_cm);
+      }
+      valid_for_alpha = std::isfinite(alpha_effective) && alpha_effective > 0.0;
     }
 
-    g_energy_reservoir.fill_histogram(h_electron_energy);
-    eed_samples_seen = g_energy_reservoir.seen;
-    eed_samples_stored =
-        static_cast<Long64_t>(g_energy_reservoir.samples.size());
-    n_excitations = g_excitation_histograms.excitation_counter;
+    for (const float energy : g_energy.values) h_electron_energy.Fill(energy);
 
+    double pressure_torr = config.pressure_torr();
+    double height_mm = 10.0 * config.z_max_cm();
+    double launch_z_mm = 10.0 * config.launch_z_cm();
+    double relative_gain_error = gain > 0.0 ? gain_error / gain
+                                            : std::numeric_limits<double>::quiet_NaN();
+    Long64_t eed_seen = g_energy.seen;
+    Long64_t eed_stored = static_cast<Long64_t>(g_energy.values.size());
+    // Preserve the historical hLevels count while also exposing the
+    // individual Garfield collision categories explicitly.
+    Long64_t n_non_elastic = g_collisions.n_non_elastic;
+    Long64_t n_non_elastic_gas1 = g_collisions.n_non_elastic_gas1;
+    Long64_t n_non_elastic_gas2 = g_collisions.n_non_elastic_gas2;
+    Long64_t n_inelastic_type3 = g_collisions.n_inelastic_type3;
+    Long64_t n_inelastic_type3_gas1 = g_collisions.n_inelastic_type3_gas1;
+    Long64_t n_inelastic_type3_gas2 = g_collisions.n_inelastic_type3_gas2;
+    Long64_t n_excitation_type4 = g_collisions.n_excitation_type4;
+    Long64_t n_excitation_type4_gas1 = g_collisions.n_excitation_type4_gas1;
+    Long64_t n_excitation_type4_gas2 = g_collisions.n_excitation_type4_gas2;
+    Long64_t n_excitations = g_collisions.n_excitation_like;
+    Long64_t n_excitations_gas1 = g_collisions.n_excitation_like_gas1;
+    Long64_t n_excitations_gas2 = g_collisions.n_excitation_like_gas2;
+    Long64_t n_unassigned_levels = g_collisions.n_unassigned_levels;
+    Long64_t n_ionisations = g_collisions.n_ionisations;
+    Long64_t n_attachments = g_collisions.n_attachments;
+    Long64_t n_superelastic = g_collisions.n_superelastic;
+    bool precision_reached =
+        config.target_relative_error > 0.0 &&
+        std::isfinite(relative_gain_error) &&
+        relative_gain_error <= config.target_relative_error;
+
+    // Compact gasData. Keep only configuration and optional MediumMagboltz
+    // transport quantities requested by the campaign.
+    double magboltz_alpha = gas_transport.townsend_cm_inv;
+    double magboltz_eta = gas_transport.attachment_cm_inv;
+    double magboltz_alpha_eff = std::numeric_limits<double>::quiet_NaN();
+    if (std::isfinite(magboltz_alpha) && std::isfinite(magboltz_eta)) {
+      magboltz_alpha_eff = magboltz_alpha - magboltz_eta;
+    }
+    double magboltz_vz_drift = gas_transport.vz_cm_ns;
+    double magboltz_longitudinal_diffusion =
+        gas_transport.longitudinal_diffusion;
+    double magboltz_transverse_diffusion =
+        gas_transport.transverse_diffusion;
+
+    gas_data.Branch("gas1", &config.gas1);
+    gas_data.Branch(
+        "composition1_pct", &config.composition1, "composition1_pct/D");
+    gas_data.Branch("gas2", &config.gas2);
+    gas_data.Branch(
+        "composition2_pct", &config.composition2, "composition2_pct/D");
+    gas_data.Branch(
+        "pressure_bar", &config.pressure_bar, "pressure_bar/D");
+    gas_data.Branch(
+        "temperature_K", &config.temperature_k, "temperature_K/D");
+    gas_data.Branch(
+        "electricField_V_cm", &config.field_v_cm, "electricField_V_cm/D");
+    gas_data.Branch("gap_mm", &config.gap_mm, "gap_mm/D");
+    gas_data.Branch("height_mm", &height_mm, "height_mm/D");
+    gas_data.Branch("spaceCharge", &config.space_charge, "spaceCharge/O");
+    gas_data.Branch("npe", &actual_npe, "npe/I");
+    gas_data.Branch(
+        "townsendAlpha_cm_inv", &magboltz_alpha,
+        "townsendAlpha_cm_inv/D");
+    gas_data.Branch(
+        "attachmentEta_cm_inv", &magboltz_eta,
+        "attachmentEta_cm_inv/D");
+    gas_data.Branch(
+        "alphaEffective_cm_inv", &magboltz_alpha_eff,
+        "alphaEffective_cm_inv/D");
+    gas_data.Branch(
+        "driftVelocityZ_cm_ns", &magboltz_vz_drift,
+        "driftVelocityZ_cm_ns/D");
+    gas_data.Branch(
+        "longitudinalDiffusion_sqrt_cm", &magboltz_longitudinal_diffusion,
+        "longitudinalDiffusion_sqrt_cm/D");
+    gas_data.Branch(
+        "transverseDiffusion_sqrt_cm", &magboltz_transverse_diffusion,
+        "transverseDiffusion_sqrt_cm/D");
     gas_data.Fill();
+
+    // ========================================================================
+    //                              Save ROOT
+    // ========================================================================
 
     output.cd();
     h_electron_energy.Write("hElectronEnergyDistribution", TObject::kOverwrite);
     h_levels.Write("hLevels", TObject::kOverwrite);
-    h_exc_xy.Write("hExcXY", TObject::kOverwrite);
-    h_exc_zt.Write("hExcZT", TObject::kOverwrite);
+    if (h_exc_xy != nullptr) {
+      h_exc_xy->Write("hExcXY", TObject::kOverwrite);
+    }
+    if (h_exc_zt != nullptr) {
+      h_exc_zt->Write("hExcZT", TObject::kOverwrite);
+    }
     data_per_primary.Write("dataPerPrimaryElectron", TObject::kOverwrite);
     data_per_electron.Write("dataPerElectron", TObject::kOverwrite);
     gas_data.Write("gasData", TObject::kOverwrite);
-    output.Close();
 
-    std::cout << "average # of electrons produced: " << summary.ne_mean << "\n"
-              << "average # of ions produced: " << summary.ni_mean << "\n"
-              << "simulated alphaEff: " << summary.alpha_eff
-              << " 1/cm (validForAlpha=" << (summary.valid_for_alpha ? 1 : 0) << ")\n"
-              << "EED samples stored/seen: " << eed_samples_stored << "/"
-              << eed_samples_seen << "\n"
-              << "Excitations accumulated: " << n_excitations << "\n"
-              << "space-charge ion rings: " << space_charge.n_ion_rings << "\n";
+    // ROOT automatically attaches histograms and trees created while a TFile is
+    // the current directory. These objects are also owned by stack variables or
+    // std::unique_ptr in this function. Detach them before closing the file so
+    // TFile::Close does not delete them and leave their C++ owners with dangling
+    // pointers (which caused the TH2I double-delete crash, exit code 139).
+    h_electron_energy.SetDirectory(nullptr);
+    h_levels.SetDirectory(nullptr);
+    if (h_exc_xy != nullptr) h_exc_xy->SetDirectory(nullptr);
+    if (h_exc_zt != nullptr) h_exc_zt->SetDirectory(nullptr);
+    data_per_primary.SetDirectory(nullptr);
+    data_per_electron.SetDirectory(nullptr);
+    gas_data.SetDirectory(nullptr);
+
+    output.Close();
 
     const double wall_time = std::difftime(std::time(nullptr), wall_start);
     const double cpu_time =
         static_cast<double>(std::clock() - cpu_start) / CLOCKS_PER_SEC;
-    std::cout << "It took you " << wall_time << " seconds to finish.\n"
-              << "CPU time = " << cpu_time << "s\n"
-              << "DONE " << config.job_id << "\n"
-              << "Finalizando correctamente uniformE().\n";
+
+    std::cout << std::setprecision(8)
+              << "RESULT gain=" << gain
+              << " gainError=" << gain_error
+              << " alphaEffective=" << alpha_effective
+              << " alphaError=" << alpha_error
+              << " npe=" << actual_npe << "\n"
+              << "Non-elastic collisions (hLevels): " << n_non_elastic << "\n"
+              << "Inelastic type 3: " << n_inelastic_type3 << "\n"
+              << "Excitation type 4: " << n_excitation_type4 << "\n"
+              << "Excitation-like type 3+4: " << n_excitations << "\n"
+              << "Ionisations: " << n_ionisations << "\n"
+              << "Wall time: " << wall_time << " s\n"
+              << "CPU time: " << cpu_time << " s\n"
+              << "DONE " << config.job_id << std::endl;
 
     return EXIT_SUCCESS;
-  } catch (const std::exception& exc) {
-    std::cerr << "[ERROR] " << exc.what() << std::endl;
+  } catch (const std::exception& error) {
+    std::cerr << "[ERROR] " << error.what() << std::endl;
     return EXIT_FAILURE;
   }
 }

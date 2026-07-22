@@ -1,0 +1,14 @@
+scan_mode: gain
+
+# Test corto del nuevo predictor: primero construye la curva en 1 bar y
+# después la usa para 0.5 y 2 bar.
+mixtures:
+  ArCF4: [0]
+
+pressures_bar: [0.5, 1, 2]
+
+gaps_mm:
+  0.05: [2, 5, 20, 50, 100]
+
+gain_tolerance: 0.05
+workers: 1

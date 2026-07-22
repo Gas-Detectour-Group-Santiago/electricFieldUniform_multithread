@@ -15,7 +15,7 @@
     "uniformE.C": "cpp",
     "iostream": "cpp"
   },
-  "cmake.sourceDirectory": "/home/daniel/GitHub/TFM-Simulations/cross_section_in_gas",
+  "cmake.sourceDirectory": "/home/daniel/GitHub/electricFieldUniform_multithread",
 
   "cmake.configureSettings": {
     "CMAKE_PREFIX_PATH": "/home/daniel/garfield/install"
