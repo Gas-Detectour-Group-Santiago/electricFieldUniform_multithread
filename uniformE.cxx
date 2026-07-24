@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -97,6 +98,8 @@ struct Config {
   double composition1 = 0.0;
   std::string gas2;
   double composition2 = 0.0;
+  std::string gas3;
+  double composition3 = 0.0;
   double height_factor = 1.5;
   bool space_charge = false;
   bool make_gif = false;
@@ -105,7 +108,8 @@ struct Config {
   bool gif_move_ions = true;
   double gif_ion_speed_cm_ns = 1.0e-4;
   bool record_excitation_positions = true;
-  bool measure_gas_transport = true;
+  bool measure_gas_transport = false;
+  int magboltz_collisions = 1;
   int job_id = 0;
   std::string gif_file;
 
@@ -138,10 +142,11 @@ std::vector<LevelInfo> read_level_info(const Config& config,
   // MediumMagboltz::GetLevel returns ngas as the index of the gas in the
   // active mixture. Components with a zero fraction are not passed to
   // SetComposition, so map the active Magboltz index back to the original
-  // gas1/gas2 slot used in the configuration.
+  // gas1/gas2/gas3 slot used in the configuration.
   std::vector<int> active_slots;
   if (config.composition1 > 0.0) active_slots.push_back(0);
   if (config.composition2 > 0.0) active_slots.push_back(1);
+  if (config.composition3 > 0.0) active_slots.push_back(2);
 
   std::vector<LevelInfo> levels;
   levels.reserve(static_cast<std::size_t>(n_levels));
@@ -158,7 +163,13 @@ std::vector<LevelInfo> read_level_info(const Config& config,
         info.gas_index < static_cast<int>(active_slots.size())) {
       info.component_slot =
           active_slots[static_cast<std::size_t>(info.gas_index)];
-      info.gas_name = info.component_slot == 0 ? config.gas1 : config.gas2;
+      if (info.component_slot == 0) {
+        info.gas_name = config.gas1;
+      } else if (info.component_slot == 1) {
+        info.gas_name = config.gas2;
+      } else {
+        info.gas_name = config.gas3;
+      }
     }
     levels.push_back(std::move(info));
   }
@@ -172,7 +183,7 @@ Config read_config(int argc, char* argv[]) {
         "minNpe maxNpe targetRelativeError gas1 comp1 gas2 comp2 heightFactor "
         "spaceCharge makeGif gifTmax(ns) gifFrames jobId [gifFile] "
         "[gifMoveIons] [gifIonSpeedCmNs] [recordExcitationPositions] "
-        "[measureGasTransport]");
+        "[measureGasTransport] [gas3] [comp3] [magboltzCollisions]");
   }
 
   Config c;
@@ -205,6 +216,11 @@ Config read_config(int argc, char* argv[]) {
     c.measure_gas_transport =
         parse_int(argv[23], "measureGasTransport") != 0;
   }
+  if (argc > 24) c.gas3 = argv[24];
+  if (argc > 25) c.composition3 = parse_double(argv[25], "composition3");
+  if (argc > 26) {
+    c.magboltz_collisions = parse_int(argv[26], "magboltzCollisions");
+  }
 
   if (c.field_v_cm <= 0.0) throw std::runtime_error("field must be positive");
   if (c.gap_mm <= 0.0) throw std::runtime_error("gap must be positive");
@@ -218,11 +234,26 @@ Config read_config(int argc, char* argv[]) {
   if (c.height_factor < 1.0) {
     throw std::runtime_error("heightFactor must be at least 1");
   }
-  if (c.composition1 < 0.0 || c.composition2 < 0.0) {
+  if (c.magboltz_collisions < 1) {
+    throw std::runtime_error("magboltzCollisions must be at least 1");
+  }
+  if (c.composition1 < 0.0 || c.composition2 < 0.0 ||
+      c.composition3 < 0.0) {
     throw std::runtime_error("Gas compositions cannot be negative");
   }
-  if (c.composition1 <= 0.0 && c.composition2 <= 0.0) {
+  if (c.composition1 <= 0.0 && c.composition2 <= 0.0 &&
+      c.composition3 <= 0.0) {
     throw std::runtime_error("At least one gas composition must be positive");
+  }
+  if ((c.composition1 > 0.0 && c.gas1.empty()) ||
+      (c.composition2 > 0.0 && c.gas2.empty()) ||
+      (c.composition3 > 0.0 && c.gas3.empty())) {
+    throw std::runtime_error("Every positive gas fraction needs a gas name");
+  }
+  const double composition_sum =
+      c.composition1 + c.composition2 + c.composition3;
+  if (std::abs(composition_sum - 100.0) > 1.0e-6) {
+    throw std::runtime_error("Gas compositions must add to 100 percent");
   }
   if (c.gif_ion_speed_cm_ns < 0.0) {
     throw std::runtime_error("gifIonSpeedCmNs cannot be negative");
@@ -474,22 +505,30 @@ struct GasTransport {
   double transverse_diffusion = std::numeric_limits<double>::quiet_NaN();
   double townsend_cm_inv = std::numeric_limits<double>::quiet_NaN();
   double attachment_cm_inv = std::numeric_limits<double>::quiet_NaN();
+  double runtime_seconds = std::numeric_limits<double>::quiet_NaN();
 
   void measure(const Config& config, MediumMagboltz& gas) {
     enabled = config.measure_gas_transport;
     if (!enabled) return;
 
     // Initialise() prepares the microscopic collision table used by
-    // AvalancheMicroscopic, but it does not generate the macroscopic transport
-    // table.  Build a tiny three-point grid centred on the exact simulation
-    // field so ElectronVelocity/Townsend/Attachment have real Magboltz data.
-    const double half_width = std::max(1.0, 1.0e-3 * config.field_v_cm);
-    const double field_min = std::max(1.0e-6, config.field_v_cm - half_width);
-    const double field_max = config.field_v_cm + half_width;
-    gas.SetFieldGrid(field_min, field_max, 3, false);
-    std::cout << "[Magboltz] transport table around E = "
-              << config.field_v_cm << " V/cm" << std::endl;
-    gas.GenerateGasTable(3);
+    // AvalancheMicroscopic, but it does not generate macroscopic transport
+    // coefficients. Only one exact electric-field point is needed here.
+    //
+    // The previous implementation generated three nearby fields with
+    // GenerateGasTable(3): 3 fields x 3e7 collisions = 9e7 collisions for
+    // every avalanche attempt. The default one-point, 1e7-collision
+    // calculation is roughly nine times cheaper and avoids interpolation
+    // around the field. The collision multiplier remains configurable.
+    gas.SetFieldGrid(config.field_v_cm, config.field_v_cm, 1, false);
+    std::cout << "MAGBOLTZ_START " << config.job_id << " "
+              << config.field_v_cm << std::endl;
+    const auto transport_start = std::chrono::steady_clock::now();
+    gas.GenerateGasTable(config.magboltz_collisions, false);
+    runtime_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - transport_start).count();
+    std::cout << "MAGBOLTZ_DONE " << config.job_id << " "
+              << runtime_seconds << std::endl;
 
     const double ex = 0.0;
     const double ey = 0.0;
@@ -874,13 +913,28 @@ int main(int argc, char* argv[]) {
     // ========================================================================
 
     MediumMagboltz gas;
-    if (config.composition1 > 0.0 && config.composition2 > 0.0) {
-      gas.SetComposition(config.gas1, config.composition1,
-                         config.gas2, config.composition2);
-    } else if (config.composition1 > 0.0) {
-      gas.SetComposition(config.gas1, config.composition1);
+    std::vector<std::pair<std::string, double>> active_gases;
+    if (config.composition1 > 0.0) {
+      active_gases.push_back({config.gas1, config.composition1});
+    }
+    if (config.composition2 > 0.0) {
+      active_gases.push_back({config.gas2, config.composition2});
+    }
+    if (config.composition3 > 0.0) {
+      active_gases.push_back({config.gas3, config.composition3});
+    }
+
+    if (active_gases.size() == 1) {
+      gas.SetComposition(active_gases[0].first, active_gases[0].second);
+    } else if (active_gases.size() == 2) {
+      gas.SetComposition(active_gases[0].first, active_gases[0].second,
+                         active_gases[1].first, active_gases[1].second);
+    } else if (active_gases.size() == 3) {
+      gas.SetComposition(active_gases[0].first, active_gases[0].second,
+                         active_gases[1].first, active_gases[1].second,
+                         active_gases[2].first, active_gases[2].second);
     } else {
-      gas.SetComposition(config.gas2, config.composition2);
+      throw std::runtime_error("Require between one and three active gases");
     }
 
     gas.SetTemperature(config.temperature_k);
@@ -1000,6 +1054,12 @@ int main(int argc, char* argv[]) {
     Long64_t ne_total = 0;
     Long64_t ni_total = 0;
 
+    // Emit live progress by elapsed wall time rather than only every fixed
+    // fraction of max_npe. At high gain a single primary can be expensive, so
+    // max_npe / 50 made the GUI look frozen for long periods.
+    auto last_progress_update =
+        std::chrono::steady_clock::now() - std::chrono::seconds(1);
+
     for (int event = 0; event < config.max_npe; ++event) {
       g_collisions.start_primary();
 
@@ -1052,11 +1112,18 @@ int main(int argc, char* argv[]) {
       }
 
       const int completed = event + 1;
-      const int progress_step = std::max(1, config.max_npe / 50);
-      if (completed == 1 || completed == config.max_npe ||
-          completed % progress_step == 0) {
+      const auto now = std::chrono::steady_clock::now();
+      const bool progress_due =
+          completed == 1 || completed == config.max_npe ||
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              now - last_progress_update).count() >= 250;
+      if (progress_due) {
+        const double running_gain = electron_statistics.mean;
+        const double running_relative_error = electron_statistics.relative_error();
         std::cout << "PROGRESS " << config.job_id << " " << completed << " "
-                  << config.max_npe << std::endl;
+                  << config.max_npe << " " << running_gain << " "
+                  << running_relative_error << std::endl;
+        last_progress_update = now;
       }
 
       const bool enough_primaries = completed >= config.min_npe;
@@ -1140,6 +1207,9 @@ int main(int argc, char* argv[]) {
     gas_data.Branch("gas2", &config.gas2);
     gas_data.Branch(
         "composition2_pct", &config.composition2, "composition2_pct/D");
+    gas_data.Branch("gas3", &config.gas3);
+    gas_data.Branch(
+        "composition3_pct", &config.composition3, "composition3_pct/D");
     gas_data.Branch(
         "pressure_bar", &config.pressure_bar, "pressure_bar/D");
     gas_data.Branch(
@@ -1168,6 +1238,12 @@ int main(int argc, char* argv[]) {
     gas_data.Branch(
         "transverseDiffusion_sqrt_cm", &magboltz_transverse_diffusion,
         "transverseDiffusion_sqrt_cm/D");
+    gas_data.Branch(
+        "magboltzTransportTime_s", &gas_transport.runtime_seconds,
+        "magboltzTransportTime_s/D");
+    gas_data.Branch(
+        "magboltzCollisions", &config.magboltz_collisions,
+        "magboltzCollisions/I");
     gas_data.Fill();
 
     // ========================================================================

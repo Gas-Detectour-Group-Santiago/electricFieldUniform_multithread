@@ -1,4 +1,11 @@
-cmake_minimum_required(VERSION 3.9 FATAL_ERROR)
+
+cmake_minimum_required(VERSION 3.12)
+
+# Garfield++ y ROOT de esta máquina son Apple Silicon.
+if(APPLE)
+  set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "" FORCE)
+endif()
+
 project(electricUniform)
 
 if(NOT TARGET Garfield::Garfield)

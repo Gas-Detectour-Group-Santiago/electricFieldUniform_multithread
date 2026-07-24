@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
 import json
@@ -29,6 +29,8 @@ class AlphaPoint:
     alpha_error: float
     npe: int
     root: str
+    composition: str = ""
+    components: list[dict[str, float]] = field(default_factory=list)
 
     @property
     def field_kv_cm(self) -> float:
@@ -204,21 +206,30 @@ def field_for_gain(fit: AlphaFit, pressure_bar: float, gap_mm: float,
     raise ValueError("The fitted alpha curve could not bracket the target gain")
 
 
+def _point_composition_key(point: AlphaPoint) -> str:
+    if point.composition:
+        return point.composition
+    # Backward compatibility for alpha JSON files produced before explicit
+    # compositions were introduced.
+    return f"fraction_{point.fraction:g}"
+
+
 def write_alpha_file(path: Path, mixture: str, gap_mm: float,
                      points: list[AlphaPoint]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    fractions: dict[str, dict] = {}
-    for fraction in sorted({point.fraction for point in points}):
-        fraction_points = [
-            point for point in points if abs(point.fraction - fraction) < 1.0e-9
+    compositions: dict[str, dict] = {}
+    for key in sorted({_point_composition_key(point) for point in points}):
+        composition_points = [
+            point for point in points if _point_composition_key(point) == key
         ]
-        fit = fit_alpha(fraction_points)
-        key = f"{fraction:g}"
-        fractions[key] = {
+        fit = fit_alpha(composition_points)
+        components = composition_points[0].components if composition_points else []
+        compositions[key] = {
+            "components": components,
             "parameters": fit.as_json() if fit is not None else None,
             "points": [asdict(point) for point in sorted(
-                fraction_points,
+                composition_points,
                 key=lambda p: (p.pressure_bar, p.field_v_cm, p.npe),
             )],
         }
@@ -233,7 +244,7 @@ def write_alpha_file(path: Path, mixture: str, gap_mm: float,
             "field": "V cm^-1",
             "alpha_effective": "cm^-1",
         },
-        "fractions": fractions,
+        "compositions": compositions,
     }
 
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -241,11 +252,15 @@ def write_alpha_file(path: Path, mixture: str, gap_mm: float,
     temporary.replace(path)
 
 
-def read_fit(path: Path, fraction: float) -> AlphaFit | None:
+def read_fit(path: Path, composition: str | float) -> AlphaFit | None:
     if not path.exists():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
-    entry = payload.get("fractions", {}).get(f"{fraction:g}", {})
+    key = str(composition)
+    entry = payload.get("compositions", {}).get(key, {})
+    if not entry and isinstance(composition, (int, float)):
+        # Backward compatibility with the former binary-fraction layout.
+        entry = payload.get("fractions", {}).get(f"{float(composition):g}", {})
     parameters = entry.get("parameters")
     if not parameters:
         return None

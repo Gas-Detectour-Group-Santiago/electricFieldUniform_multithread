@@ -6,6 +6,7 @@ from __future__ import annotations
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime, timezone
 from threading import Lock
 from typing import Iterable
 import argparse
@@ -42,25 +43,16 @@ ROOT_OUTPUT = OUTPUTS / "roots"
 ALPHA_OUTPUT = OUTPUTS / "alpha"
 GIF_OUTPUT = OUTPUTS / "gifs"
 LEGACY_ROOT_OUTPUT = OUTPUTS / "legacy_roots"
+ATTEMPT_LOG = OUTPUTS / "metadata" / "campaign_attempts.jsonl"
 
-EXPECTED_GAS_DATA_BRANCHES = {
+# Only the information needed to recover a physical (E, p, gap, gain) point
+# is mandatory.  Third-gas, transport, histogram and historical branches are
+# optional so older binary ROOT files remain reusable.
+CORE_GAS_DATA_BRANCHES = {
     "gas1",
     "composition1_pct",
-    "gas2",
-    "composition2_pct",
     "pressure_bar",
-    "temperature_K",
-    "electricField_V_cm",
     "gap_mm",
-    "height_mm",
-    "spaceCharge",
-    "npe",
-    "townsendAlpha_cm_inv",
-    "attachmentEta_cm_inv",
-    "alphaEffective_cm_inv",
-    "driftVelocityZ_cm_ns",
-    "longitudinalDiffusion_sqrt_cm",
-    "transverseDiffusion_sqrt_cm",
 }
 
 FIELD_FROM_NAME = re.compile(r"_(?P<field>[0-9]+(?:\.[0-9]+)?)kVcm_")
@@ -70,15 +62,36 @@ class LegacyRootError(ValueError):
     """The ROOT belongs to an older output schema and must not be reused."""
 
 
-MIXTURE_COMPONENTS = {
-    "ArCF4": ("ar", "cf4"),
-    "ArN2": ("ar", "n2"),
-    "HeCF4": ("he", "cf4"),
-    "ArCO2": ("ar", "co2"),
-    "ArCH4": ("ar", "ch4"),
-    "ArIso": ("ar", "ic4h10"),
-    "ArC2H2F4": ("ar", "c2h2f4"),
+GAS_ALIASES = {
+    "ar": "ar",
+    "argon": "ar",
+    "he": "he",
+    "helium": "he",
+    "cf4": "cf4",
+    "n2": "n2",
+    "co2": "co2",
+    "ch4": "ch4",
+    "iso": "ic4h10",
+    "isobutane": "ic4h10",
+    "ic4h10": "ic4h10",
+    "c2h2f4": "c2h2f4",
 }
+
+GAS_DISPLAY = {
+    "ar": "Ar",
+    "he": "He",
+    "cf4": "CF4",
+    "n2": "N2",
+    "co2": "CO2",
+    "ch4": "CH4",
+    "ic4h10": "Iso",
+    "c2h2f4": "C2H2F4",
+}
+
+GAS_FILE_TOKEN = {
+    "ic4h10": "iso",
+}
+
 
 EVENT_LOCK = Lock()
 PROCESS_LOCK = Lock()
@@ -89,8 +102,22 @@ STOP_REQUESTED = False
 @dataclass(frozen=True)
 class Family:
     mixture: str
-    fraction: float
+    components: tuple[tuple[str, float], ...]
     gap_mm: float
+
+    @property
+    def composition(self) -> str:
+        return composition_key(self.components)
+
+    @property
+    def composition_label(self) -> str:
+        return format_composition(self.components)
+
+    @property
+    def fraction(self) -> float:
+        # Kept only for old AlphaPoint JSON compatibility. New scheduling and
+        # fitting use the complete composition string.
+        return self.components[1][1] if len(self.components) > 1 else 0.0
 
 
 @dataclass(frozen=True)
@@ -109,7 +136,8 @@ class FieldTarget:
 class CampaignOptions:
     space_charge: bool = False
     record_excitation_positions: bool = True
-    measure_gas_transport: bool = True
+    measure_gas_transport: bool = False
+    magboltz_collisions: int = 1
 
 
 @dataclass
@@ -182,13 +210,121 @@ def build_project(jobs: int | None = None) -> None:
     emit("build_finished", executable=str(EXECUTABLE))
 
 
-def mixture_components(mixture: str, fraction: float) -> tuple[str, float, str, float]:
-    if mixture not in MIXTURE_COMPONENTS:
-        raise ValueError(f"Unknown mixture: {mixture}")
-    if not 0.0 <= fraction <= 100.0:
-        raise ValueError(f"Invalid fraction for {mixture}: {fraction}")
-    gas1, gas2 = MIXTURE_COMPONENTS[mixture]
-    return gas1, 100.0 - fraction, gas2, fraction
+def normalize_gas_name(name: str) -> str:
+    key = str(name).strip().lower()
+    if key not in GAS_ALIASES:
+        raise ValueError(f"Unknown gas identifier: {name}")
+    return GAS_ALIASES[key]
+
+
+def normalize_components(raw: dict) -> tuple[tuple[str, float], ...]:
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(
+            "Each mixture composition must be a mapping, for example "
+            "{ar: 99, cf4: 1}"
+        )
+    if len(raw) > 3:
+        raise ValueError("This project currently supports at most three gases")
+
+    components: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for gas_name, fraction in raw.items():
+        gas = normalize_gas_name(str(gas_name))
+        value = float(fraction)
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"Invalid fraction for {gas_name}: {fraction}")
+        if gas in seen:
+            raise ValueError(f"Gas {gas} is repeated in one composition")
+        seen.add(gas)
+        components.append((gas, value))
+
+    total = sum(value for _, value in components)
+    if total <= 0.0:
+        raise ValueError("At least one gas fraction must be positive")
+    if abs(total - 100.0) > 1.0e-6:
+        raise ValueError(
+            f"Gas fractions must add to 100 %, obtained {total:.12g} %"
+        )
+    return tuple(components)
+
+
+def parse_components_argument(text: str) -> tuple[tuple[str, float], ...]:
+    raw: dict[str, float] = {}
+    for item in str(text).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" not in item:
+            raise ValueError(
+                "Invalid --components value. Use gas:fraction pairs, "
+                "for example ar:99,cf4:1"
+            )
+        gas, fraction = item.split(":", 1)
+        raw[gas.strip()] = float(fraction)
+    return normalize_components(raw)
+
+
+def parse_mixture_families(config: dict) -> list[tuple[str, tuple[tuple[str, float], ...]]]:
+    raw_mixtures = config.get("mixtures")
+    if not isinstance(raw_mixtures, dict) or not raw_mixtures:
+        raise ValueError("mixtures must be a non-empty YAML mapping")
+
+    parsed: list[tuple[str, tuple[tuple[str, float], ...]]] = []
+    for mixture, entries in raw_mixtures.items():
+        if not isinstance(entries, list) or not entries:
+            raise ValueError(f"Mixture {mixture} must contain a non-empty list")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"Mixture {mixture} still uses the old fraction-list format. "
+                    "Use explicit compositions such as - {ar: 99, cf4: 1}."
+                )
+            components = normalize_components(entry)
+            canonical_name = mixture_name_from_components(components)
+            if str(mixture) != canonical_name:
+                raise ValueError(
+                    f"Mixture key {mixture!r} does not match its components. "
+                    f"Use {canonical_name!r}."
+                )
+            parsed.append((str(mixture), components))
+    return parsed
+
+
+def composition_key(components: tuple[tuple[str, float], ...]) -> str:
+    return "__".join(
+        f"{gas}_{fraction:.12g}" for gas, fraction in components
+    )
+
+
+def format_composition(components: tuple[tuple[str, float], ...]) -> str:
+    return " / ".join(
+        f"{GAS_DISPLAY.get(gas, gas)} {fraction:g}%"
+        for gas, fraction in components
+    )
+
+
+def mixture_name_from_components(components: tuple[tuple[str, float], ...]) -> str:
+    return "".join(GAS_DISPLAY.get(gas, gas) for gas, _ in components)
+
+
+def component_dicts(components: tuple[tuple[str, float], ...]) -> list[dict[str, float]]:
+    return [{"gas": gas, "fraction_pct": float(fraction)}
+            for gas, fraction in components]
+
+
+def padded_components(components: tuple[tuple[str, float], ...]):
+    padded = list(components) + [("", 0.0)] * (3 - len(components))
+    return padded[0], padded[1], padded[2]
+
+
+def components_from_gas_data(tree) -> tuple[tuple[str, float], ...]:
+    values = []
+    for index in (1, 2, 3):
+        gas = str(scalar(tree, [f"gas{index}"], "")).strip().lower()
+        fraction = float(scalar(tree, [f"composition{index}_pct"], 0.0))
+        if gas:
+            values.append((normalize_gas_name(gas), fraction))
+    return tuple(values)
 
 
 def scalar(tree, names: Iterable[str], default=None):
@@ -207,14 +343,6 @@ def scalar(tree, names: Iterable[str], default=None):
     return default
 
 
-def _mixture_from_gases(gas1: str, gas2: str) -> str:
-    pair = (gas1.strip().lower(), gas2.strip().lower())
-    for mixture, components in MIXTURE_COMPONENTS.items():
-        if pair == tuple(component.lower() for component in components):
-            return mixture
-    return ""
-
-
 def _field_from_root_name(path: Path) -> float:
     match = FIELD_FROM_NAME.search(path.name)
     if match is None:
@@ -231,28 +359,28 @@ def _top_level_names(root_file) -> set[str]:
 def read_root(path: Path, *, field_v_cm: float | None = None) -> AlphaPoint:
     with uproot.open(path) as root_file:
         names = _top_level_names(root_file)
-        if "levelMap" in names:
-            raise LegacyRootError("contains removed levelMap tree")
-        required_objects = {"gasData", "dataPerPrimaryElectron", "hLevels"}
+        # levelMap and hLevels describe historical diagnostic schemas.  They
+        # neither invalidate nor alter the gain point, so they are ignored.
+        required_objects = {"gasData", "dataPerPrimaryElectron"}
         missing_objects = required_objects - names
         if missing_objects:
             raise LegacyRootError(
-                "missing current objects: " + ", ".join(sorted(missing_objects))
+                "missing gain objects: " + ", ".join(sorted(missing_objects))
             )
 
         tree = root_file["gasData"]
         branches = set(tree.keys())
-        missing = EXPECTED_GAS_DATA_BRANCHES - branches
+        missing = CORE_GAS_DATA_BRANCHES - branches
         if missing:
             raise LegacyRootError(
-                "gasData is missing required branches: "
+                "gasData is missing core branches: "
                 + ",".join(sorted(missing))
             )
 
-        gas1 = str(scalar(tree, ["gas1"], ""))
-        gas2 = str(scalar(tree, ["gas2"], ""))
-        mixture = _mixture_from_gases(gas1, gas2)
-        fraction = float(scalar(tree, ["composition2_pct"], 0.0))
+        components = components_from_gas_data(tree)
+        mixture = mixture_name_from_components(components)
+        composition = composition_key(components)
+        fraction = components[1][1] if len(components) > 1 else 0.0
         pressure_bar = float(scalar(tree, ["pressure_bar"], math.nan))
         gap_mm = float(scalar(tree, ["gap_mm"], math.nan))
         npe = int(scalar(tree, ["npe"], 0))
@@ -293,8 +421,8 @@ def read_root(path: Path, *, field_v_cm: float | None = None) -> AlphaPoint:
         ]
         gas_transport_enabled = any(math.isfinite(value) for value in transport_values)
 
-    if not mixture:
-        raise ValueError(f"Unknown gas pair in ROOT: {gas1}/{gas2}")
+    if not mixture or not components:
+        raise ValueError("ROOT contains no valid gas composition")
     if not all(math.isfinite(value) for value in
                (pressure_bar, gap_mm, field_v_cm, gain)):
         raise ValueError("ROOT is missing pressure, gap, electric field or gain")
@@ -322,6 +450,8 @@ def read_root(path: Path, *, field_v_cm: float | None = None) -> AlphaPoint:
         alpha_error=alpha_error,
         npe=npe,
         root=stored_path,
+        composition=composition,
+        components=component_dicts(components),
     )
     point.space_charge_enabled = space_charge_enabled
     point.excitation_positions_enabled = excitation_positions_enabled
@@ -371,6 +501,8 @@ def read_field_result(path: Path, job: Job) -> AlphaPoint:
         alpha_error=alpha_error,
         npe=int(len(ne)),
         root=str(path),
+        composition=job.family.composition,
+        components=component_dicts(job.family.components),
     )
     point.space_charge_enabled = job.options.space_charge
     point.excitation_positions_enabled = job.options.record_excitation_positions
@@ -400,16 +532,18 @@ def _quarantine_root(path: Path, reason: str) -> None:
 
 
 def scan_roots() -> list[AlphaPoint]:
+    """Read reusable gain points without ever moving or deleting a ROOT."""
     points: list[AlphaPoint] = []
     if not ROOT_OUTPUT.exists():
         return points
     for path in sorted(ROOT_OUTPUT.rglob("*.root")):
         try:
             points.append(read_root(path))
-        except LegacyRootError as error:
-            _quarantine_root(path, str(error))
         except Exception as error:
-            print(f"[WARNING] Ignoring unreadable ROOT {path}: {error}", file=sys.stderr)
+            print(
+                f"[WARNING] Keeping but not reusing ROOT {path}: {error}",
+                file=sys.stderr,
+            )
     return points
 
 
@@ -420,6 +554,24 @@ def alpha_path(mixture: str, gap_mm: float, space_charge: bool = False) -> Path:
 
 def point_flag(point: AlphaPoint, name: str, default: bool = False) -> bool:
     return bool(getattr(point, name, default))
+
+
+def point_composition(point: AlphaPoint) -> str:
+    value = str(getattr(point, "composition", ""))
+    if value:
+        return value
+    return f"fraction_{point.fraction:g}"
+
+
+def point_components(point: AlphaPoint) -> tuple[tuple[str, float], ...]:
+    raw = getattr(point, "components", [])
+    values = []
+    for item in raw:
+        if isinstance(item, dict) and "gas" in item:
+            values.append((normalize_gas_name(item["gas"]), float(item["fraction_pct"])))
+    if values:
+        return tuple(values)
+    raise ValueError(f"Point {point.root} has no explicit gas composition")
 
 
 def save_alpha_for(
@@ -444,7 +596,7 @@ def family_points(
     return [
         point for point in points
         if point.mixture == family.mixture
-        and abs(point.fraction - family.fraction) < 1.0e-9
+        and point_composition(point) == family.composition
         and abs(point.gap_mm - family.gap_mm) < 1.0e-9
         and point_flag(point, "space_charge_enabled") == options.space_charge
         and point.gain > 1.0
@@ -461,7 +613,7 @@ def field_family_points(
     return [
         point for point in points
         if point.mixture == family.mixture
-        and abs(point.fraction - family.fraction) < 1.0e-9
+        and point_composition(point) == family.composition
         and abs(point.gap_mm - family.gap_mm) < 1.0e-9
         and point_flag(point, "space_charge_enabled") == options.space_charge
     ]
@@ -788,34 +940,84 @@ def adaptive_npe(gap_mm: float, target_gain: float) -> tuple[int, int, float]:
     return min_npe, max_npe, 0.03
 
 
+def log_saved_attempt(
+    job: Job,
+    point: AlphaPoint,
+    *,
+    accepted: bool,
+) -> None:
+    """Append one immutable record for every successfully written ROOT."""
+    requested_gain = (
+        float(job.target.gain) if isinstance(job.target, Target) else None
+    )
+    relative_difference = None
+    if requested_gain is not None and requested_gain > 0.0:
+        relative_difference = abs(point.gain - requested_gain) / requested_gain
+
+    record = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "scan_mode": job.scan_mode,
+        "job_id": job.job_id,
+        "root": point.root,
+        "mixture": job.family.mixture,
+        "composition": job.family.composition_label,
+        "composition_key": job.family.composition,
+        "components": component_dicts(job.family.components),
+        "pressure_bar": point.pressure_bar,
+        "gap_mm": point.gap_mm,
+        "field_v_cm": point.field_v_cm,
+        "requested_gain": requested_gain,
+        "measured_gain": point.gain,
+        "gain_error": point.gain_error,
+        "relative_difference": relative_difference,
+        "accepted": bool(accepted),
+        "npe": point.npe,
+        "space_charge": job.options.space_charge,
+        "record_excitation_positions": job.options.record_excitation_positions,
+        "measure_gas_transport": job.options.measure_gas_transport,
+    }
+    ATTEMPT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with ATTEMPT_LOG.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
 def root_directory(family: Family) -> Path:
     return ROOT_OUTPUT / family.mixture / f"gap_{family.gap_mm:.3f}mm"
 
 
 def unique_root_name(point: AlphaPoint) -> Path:
-    folder = root_directory(Family(point.mixture, point.fraction, point.gap_mm))
+    components = point_components(point)
+    family = Family(point.mixture, components, point.gap_mm)
+    folder = root_directory(family)
     folder.mkdir(parents=True, exist_ok=True)
 
-    gas1, comp1, gas2, comp2 = mixture_components(
-        point.mixture, point.fraction
+    gas_part = "_".join(
+        f"{GAS_FILE_TOKEN.get(gas, gas)}_{fraction:.1f}"
+        for gas, fraction in components
     )
     stem = (
-        f"{gas1}_{comp1:.1f}_{gas2}_{comp2:.1f}_"
+        f"{gas_part}_"
         f"{point.field_kv_cm:.1f}kVcm_"
         f"{point.pressure_bar:.3f}bar_"
         f"{point.gap_mm:.4f}mm_"
         f"{point.npe}npe"
     )
     candidate = folder / f"{stem}.root"
-    # The same physical point is one product. Re-running it replaces the old
-    # file instead of creating _r2, _r3, ... copies.
-    candidate.unlink(missing_ok=True)
-    return candidate
+    if not candidate.exists():
+        return candidate
 
+    # Never overwrite a previous simulation.  Repeated/refinement attempts at
+    # the same rounded field and npe remain independent physical data points.
+    run_index = 2
+    while True:
+        versioned = folder / f"{stem}_run{run_index}.root"
+        if not versioned.exists():
+            return versioned
+        run_index += 1
 
 def run_job(job: Job) -> AlphaPoint:
-    gas1, comp1, gas2, comp2 = mixture_components(
-        job.family.mixture, job.family.fraction
+    (gas1, comp1), (gas2, comp2), (gas3, comp3) = padded_components(
+        job.family.components
     )
     folder = root_directory(job.family)
     folder.mkdir(parents=True, exist_ok=True)
@@ -846,6 +1048,9 @@ def run_job(job: Job) -> AlphaPoint:
         "0",  # gifIonSpeedCmNs is irrelevant in campaign mode
         str(int(job.options.record_excitation_positions)),
         str(int(job.options.measure_gas_transport)),
+        gas3,
+        f"{comp3:.12g}",
+        str(job.options.magboltz_collisions),
     ]
 
     target_gain = job.target.gain if isinstance(job.target, Target) else None
@@ -858,7 +1063,8 @@ def run_job(job: Job) -> AlphaPoint:
         job_id=job.job_id,
         scan_mode=job.scan_mode,
         mixture=job.family.mixture,
-        fraction=job.family.fraction,
+        composition=job.family.composition_label,
+        composition_key=job.family.composition,
         gap_mm=job.family.gap_mm,
         pressure_bar=job.target.pressure_bar,
         target_gain=target_gain,
@@ -882,15 +1088,44 @@ def run_job(job: Job) -> AlphaPoint:
     assert process.stdout is not None
     for line in process.stdout:
         output_lines.append(line)
-        if line.startswith("PROGRESS"):
+        if line.startswith("MAGBOLTZ_START"):
             parts = line.split()
-            if len(parts) == 4:
-                emit(
-                    "progress",
-                    job_id=job.job_id,
-                    current=int(parts[2]),
-                    maximum=int(parts[3]),
-                )
+            payload = {"job_id": job.job_id, "field_v_cm": job.field_v_cm}
+            if len(parts) >= 3:
+                try:
+                    payload["field_v_cm"] = float(parts[2])
+                except ValueError:
+                    pass
+            emit("transport_started", **payload)
+        elif line.startswith("MAGBOLTZ_DONE"):
+            parts = line.split()
+            seconds = 0.0
+            if len(parts) >= 3:
+                try:
+                    seconds = float(parts[2])
+                except ValueError:
+                    pass
+            emit(
+                "transport_finished",
+                job_id=job.job_id,
+                field_v_cm=job.field_v_cm,
+                seconds=seconds,
+            )
+        elif line.startswith("PROGRESS"):
+            parts = line.split()
+            if len(parts) >= 4:
+                payload = {
+                    "job_id": job.job_id,
+                    "current": int(parts[2]),
+                    "maximum": int(parts[3]),
+                }
+                if len(parts) >= 6:
+                    try:
+                        payload["running_gain"] = float(parts[4])
+                        payload["relative_error"] = float(parts[5])
+                    except ValueError:
+                        pass
+                emit("progress", **payload)
     return_code = process.wait()
     with PROCESS_LOCK:
         ACTIVE_PROCESSES.discard(process)
@@ -933,21 +1168,17 @@ def campaign_targets(config: dict) -> tuple[list[Family], dict[Family, list[Targ
 
     families: list[Family] = []
     targets: dict[Family, list[Target]] = {}
-    for mixture, fractions in config["mixtures"].items():
-        if mixture not in MIXTURE_COMPONENTS:
-            raise ValueError(f"Unknown mixture in YAML: {mixture}")
-        for fraction in [float(value) for value in fractions]:
-            for gap_mm, gains in gaps.items():
-                family = Family(mixture, fraction, gap_mm)
-                families.append(family)
-                targets[family] = [
-                    Target(pressure, gain)
-                    for pressure in pressures
-                    for gain in gains
-                    if gain > 1.0
-                ]
+    for mixture, components in parse_mixture_families(config):
+        for gap_mm, gains in gaps.items():
+            family = Family(mixture, components, gap_mm)
+            families.append(family)
+            targets[family] = [
+                Target(pressure, gain)
+                for pressure in pressures
+                for gain in gains
+                if gain > 1.0
+            ]
     return families, targets
-
 
 def field_campaign_targets(
     config: dict,
@@ -966,21 +1197,17 @@ def field_campaign_targets(
 
     families: list[Family] = []
     targets: dict[Family, list[FieldTarget]] = {}
-    for mixture, fractions in config["mixtures"].items():
-        if mixture not in MIXTURE_COMPONENTS:
-            raise ValueError(f"Unknown mixture in YAML: {mixture}")
-        for fraction in [float(value) for value in fractions]:
-            for gap_mm, fields_v_cm in fields_by_gap.items():
-                family = Family(mixture, fraction, gap_mm)
-                families.append(family)
-                targets[family] = [
-                    FieldTarget(pressure, field_v_cm)
-                    for pressure in pressures
-                    for field_v_cm in fields_v_cm
-                    if field_v_cm > 0.0
-                ]
+    for mixture, components in parse_mixture_families(config):
+        for gap_mm, fields_v_cm in fields_by_gap.items():
+            family = Family(mixture, components, gap_mm)
+            families.append(family)
+            targets[family] = [
+                FieldTarget(pressure, field_v_cm)
+                for pressure in pressures
+                for field_v_cm in fields_v_cm
+                if field_v_cm > 0.0
+            ]
     return families, targets
-
 
 def field_target_match(
     points: list[AlphaPoint], target: FieldTarget, options: CampaignOptions,
@@ -1055,6 +1282,7 @@ def run_field_campaign(
         space_charge=options.space_charge,
         record_excitation_positions=options.record_excitation_positions,
         measure_gas_transport=options.measure_gas_transport,
+        magboltz_collisions=options.magboltz_collisions,
     )
 
     active: dict[Future, Job] = {}
@@ -1100,7 +1328,8 @@ def run_field_campaign(
                         job_id=job.job_id,
                         scan_mode="field",
                         mixture=family.mixture,
-                        fraction=family.fraction,
+                        composition=family.composition_label,
+                        composition_key=family.composition,
                         gap_mm=family.gap_mm,
                         pressure_bar=target.pressure_bar,
                         target_gain=None,
@@ -1113,12 +1342,14 @@ def run_field_campaign(
                     continue
 
                 completed += 1
+                log_saved_attempt(job, point, accepted=True)
                 emit(
                     "result",
                     job_id=job.job_id,
                     scan_mode="field",
                     mixture=family.mixture,
-                    fraction=family.fraction,
+                    composition=family.composition_label,
+                    composition_key=family.composition,
                     gap_mm=family.gap_mm,
                     pressure_bar=point.pressure_bar,
                     target_gain=None,
@@ -1170,15 +1401,18 @@ def run_campaign(
             else excitation_positions_override
         ),
         measure_gas_transport=(
-            bool(config.get("measure_gas_transport", True))
+            bool(config.get("measure_gas_transport", False))
             if gas_transport_override is None else gas_transport_override
         ),
+        magboltz_collisions=int(config.get("magboltz_collisions", 1)),
     )
 
     if scan_mode == "gain" and not 0.0 < tolerance < 1.0:
         raise ValueError("gain_tolerance must be between 0 and 1")
     if height_factor < 1.0:
         raise ValueError("height_factor must be at least 1")
+    if options.magboltz_collisions < 1:
+        raise ValueError("magboltz_collisions must be at least 1")
 
     if not skip_build:
         build_project(workers)
@@ -1214,12 +1448,16 @@ def run_campaign(
         space_charge=options.space_charge,
         record_excitation_positions=options.record_excitation_positions,
         measure_gas_transport=options.measure_gas_transport,
+        magboltz_collisions=options.magboltz_collisions,
     )
 
     active: dict[Future, Job] = {}
     active_families: set[Family] = set()
     job_id = 0
     failure_count: dict[tuple[Family, Target], int] = {}
+    # Keep a missed target at the front of its family queue so the field is
+    # corrected immediately instead of opening unrelated pressures first.
+    priority_target: dict[Family, Target] = {}
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         while not STOP_REQUESTED:
@@ -1249,7 +1487,12 @@ def run_campaign(
                 if not possible:
                     continue
 
-                target = select_target(current_points, possible)
+                preferred = priority_target.get(family)
+                if preferred is not None and preferred in possible:
+                    target = preferred
+                else:
+                    priority_target.pop(family, None)
+                    target = select_target(current_points, possible)
                 field = propose_field(current_points, target, family.gap_mm)
                 min_npe, max_npe, target_error = adaptive_npe(
                     family.gap_mm, target.gain
@@ -1285,17 +1528,23 @@ def run_campaign(
                 except Exception as error:
                     attempt = failure_count.get((family, requested_target), 0) + 1
                     failure_count[(family, requested_target)] = attempt
+                    will_retry = attempt < 3
+                    if will_retry:
+                        priority_target[family] = requested_target
+                    else:
+                        priority_target.pop(family, None)
                     emit(
                         "failed",
                         job_id=job.job_id,
                         scan_mode="gain",
                         mixture=family.mixture,
-                        fraction=family.fraction,
+                        composition=family.composition_label,
+                        composition_key=family.composition,
                         gap_mm=family.gap_mm,
                         pressure_bar=requested_target.pressure_bar,
                         target_gain=requested_target.gain,
                         attempt=attempt,
-                        will_retry=attempt < 3,
+                        will_retry=will_retry,
                         error=str(error),
                     )
                     continue
@@ -1308,12 +1557,18 @@ def run_campaign(
                     family_points(points, family, options), requested_target,
                     tolerance, options,
                 )
+                if matched is None:
+                    priority_target[family] = requested_target
+                else:
+                    priority_target.pop(family, None)
+                log_saved_attempt(job, point, accepted=matched is not None)
                 emit(
                     "result",
                     job_id=job.job_id,
                     scan_mode="gain",
                     mixture=family.mixture,
-                    fraction=family.fraction,
+                    composition=family.composition_label,
+                    composition_key=family.composition,
                     gap_mm=family.gap_mm,
                     pressure_bar=point.pressure_bar,
                     target_gain=requested_target.gain,
@@ -1347,20 +1602,32 @@ def run_gif(args) -> None:
         build_project(1)
     GIF_OUTPUT.mkdir(parents=True, exist_ok=True)
 
+    components = parse_components_argument(args.components)
+    mixture = mixture_name_from_components(components)
+    composition = composition_key(components)
+    (gas1, comp1), (gas2, comp2), (gas3, comp3) = padded_components(components)
+
     field_v_cm = args.field_kv_cm * 1000.0 if args.field_kv_cm else None
     if field_v_cm is None:
         fit = read_fit(
-            alpha_path(args.mixture, args.gap_mm, bool(args.space_charge)),
-            args.fraction,
+            alpha_path(mixture, args.gap_mm, bool(args.space_charge)),
+            composition,
         )
         if fit is None:
-            raise ValueError("No alpha fit is available for this mixture, fraction and gap")
-        field_v_cm = field_for_gain(fit, args.pressure_bar, args.gap_mm, args.gain)
+            raise ValueError(
+                "No alpha fit is available for this composition and gap"
+            )
+        field_v_cm = field_for_gain(
+            fit, args.pressure_bar, args.gap_mm, args.gain
+        )
 
-    gas1, comp1, gas2, comp2 = mixture_components(args.mixture, args.fraction)
+    gas_part = "_".join(
+        f"{GAS_FILE_TOKEN.get(gas, gas)}_{fraction:.1f}"
+        for gas, fraction in components
+    )
     gif_name = (
-        f"{args.mixture}_f{args.fraction:g}_p{args.pressure_bar:g}bar_"
-        f"gap{args.gap_mm:g}mm_E{field_v_cm/1000.0:.4g}kVcm.gif"
+        f"{gas_part}_{field_v_cm/1000.0:.1f}kVcm_"
+        f"{args.pressure_bar:.3f}bar_{args.gap_mm:.4f}mm.gif"
     )
     gif_path = GIF_OUTPUT / gif_name
     temporary_root = GIF_OUTPUT / f".gif_{uuid.uuid4().hex}.root"
@@ -1368,7 +1635,7 @@ def run_gif(args) -> None:
     command = [
         str(EXECUTABLE),
         str(temporary_root),
-        args.mixture,
+        mixture,
         f"{field_v_cm:.12g}",
         f"{args.gap_mm:.12g}",
         f"{args.pressure_bar:.12g}",
@@ -1388,8 +1655,10 @@ def run_gif(args) -> None:
         str(gif_path),
         str(int(args.move_ions)),
         f"{args.ion_speed_cm_ns:.12g}",
-        "0",  # no excitation-position histograms in temporary GIF ROOT
-        "0",  # no Magboltz transport branches in temporary GIF ROOT
+        "0",
+        "0",
+        gas3,
+        f"{comp3:.12g}",
     ]
 
     try:
@@ -1399,13 +1668,14 @@ def run_gif(args) -> None:
 
     print(gif_path)
 
-
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser()
     command.add_argument("config", nargs="?", type=Path)
     command.add_argument("--gif", action="store_true")
-    command.add_argument("--mixture", choices=sorted(MIXTURE_COMPONENTS))
-    command.add_argument("--fraction", type=float, default=1.0)
+    command.add_argument(
+        "--components",
+        help="Explicit gas composition, for example ar:99,cf4:1",
+    )
     command.add_argument("--pressure-bar", type=float, default=1.0)
     command.add_argument("--gap-mm", type=float, default=0.05)
     command.add_argument("--field-kv-cm", type=float)
@@ -1450,8 +1720,8 @@ def parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = parser().parse_args()
     if args.gif:
-        if not args.mixture:
-            raise SystemExit("--mixture is required in GIF mode")
+        if not args.components:
+            raise SystemExit("--components is required in GIF mode")
         if args.field_kv_cm is None and args.gain is None:
             raise SystemExit("Use either --field-kv-cm or --gain in GIF mode")
         run_gif(args)
