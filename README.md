@@ -119,12 +119,14 @@ A typical repository should contain:
 ├── CMakeLists.txt
 ├── uniformE.cxx               # Garfield++ microscopic simulation
 ├── run_campaign.py            # YAML campaigns and GIF command-line runner
-├── alpha_model.py             # alpha/p fit and field inversion
+├── alpha_model.py             # progressive alpha/p models and validation
+├── fit_diagnostics.py         # auditable PDF diagnostics
 ├── gui.py                     # PySide6 interface
 ├── run_gui.sh                 # stable GUI launcher
 ├── campaign.yaml              # user campaign configuration
 ├── .venv/                     # local Python environment
 ├── build/                     # automatically regenerated CMake build
+├── fits/                      # fit PDFs only (no PNG diagnostics)
 └── outputs/
     ├── roots/                 # production ROOT files
     ├── alpha/                 # alpha-model JSON files
@@ -172,6 +174,7 @@ scipy
 uproot
 PyYAML
 PySide6
+matplotlib
 ```
 
 Qt recommends using PySide6 inside a virtual environment rather than installing
@@ -307,7 +310,7 @@ For a first test:
 2. Load or paste a small fixed-field YAML campaign.
 3. Keep **Space charge** disabled.
 4. Keep **Magboltz transport** disabled for the quickest test.
-5. Keep **Excitation positions** enabled if `hExcXY` and `hExcZT` are needed.
+5. Keep **Excitation positions** enabled if `hExcXYZ` and `hExcZT` are needed.
 6. Click **Run campaign**.
 
 ---
@@ -455,13 +458,20 @@ A result is accepted when
 
 The runner:
 
-1. loads compatible existing ROOT points;
-2. builds or updates the reduced-alpha fit;
-3. predicts a field;
-4. runs `uniformE`;
-5. measures the gain;
-6. adds the new point to the fit;
-7. refines the field until the target is accepted.
+1. loads every compatible existing ROOT point;
+2. statistically combines repeated runs at the same physical `(p, gap, E)` point;
+3. selects the simplest supported model in the hierarchy Townsend 2p → 3p → 4p;
+4. validates candidate models in gain space before allowing them to seed a scan;
+5. uses a monotonic same-pressure controller for the actual refinement;
+6. runs `uniformE`, measures the gain and immediately rebuilds the fit;
+7. regenerates the corresponding PDF under `fits/`;
+8. refines until the target is accepted.
+
+The global alpha model is only a seed/predictor. Once a pressure has measured
+points, the local controller has priority. The newest attempt for an exact
+target imposes the sign of the next step: an overshoot can never increase the
+field and an undershoot can never decrease it. This state is reconstructed from
+`outputs/metadata/campaign_attempts.jsonl` after a restart.
 
 The fit parameters are stored under:
 
@@ -470,6 +480,62 @@ outputs/alpha/<mixture>/gap_<gap>mm.json
 ```
 
 Space-charge and non-space-charge families are kept separate.
+
+### Fit PDFs
+
+Every fit is regenerated after each successfully saved ROOT:
+
+```text
+fits/<mixture>/gap_<gap>mm/<composition>.pdf
+```
+
+Each PDF contains:
+
+- every individual ROOT used by the family;
+- the statistically combined unique `(p, E)` points and their uncertainties;
+- measured gain versus field on a logarithmic gain axis;
+- `alpha_eff/p` versus `E/p`;
+- gain-space residuals `ln(G_pred/G_measured)`;
+- the electric field predicted continuously from gain `1` to gain `10^7`;
+- solid curves inside the measured reduced-field interval and dashed
+  extrapolations outside it;
+- the complete numerical table of points entering the fit;
+- the 2p/3p/4p model comparison, cross-validation factors and rejection reasons.
+
+Regenerate every PDF without running a campaign with:
+
+```bash
+python3 fit_diagnostics.py --all
+```
+
+The GUI provides **Open fits/** and **Open selected fit** buttons.
+
+### Per-composition gain sets
+
+The classic `mixtures + pressures_bar + gaps_mm` format remains supported. For
+campaigns where each composition needs different pressures, gaps or gain
+targets, use `gain_sets`:
+
+```yaml
+scan_mode: gain
+
+gain_sets:
+  - components: {ar: 90, cf4: 10}
+    pressures_bar: [1]
+    gap_mm: 0.150
+    gain_targets: [10, 100, 1000]
+
+  - components: {ar: 95, cf4: 3, iso: 2}
+    pressures_bar: [0.5, 1]
+    gaps_mm: [0.050, 0.150]
+    gain_targets: [10, 100]
+
+gain_tolerance: 0.05
+workers: 2
+```
+
+`gap_mm` accepts one gap and `gaps_mm` accepts a list. `gain_target` is also
+accepted as an alias of `gain_targets`.
 
 ### Adaptive statistics
 
@@ -546,7 +612,36 @@ workers: 2
 ```
 
 The keys under `fields_kv_cm` are gaps in millimetres. The lists contain fields
-in `kV/cm`.
+in `kV/cm`. This classic product-grid format remains fully supported.
+
+When each composition needs its own fields, use `field_sets`:
+
+```yaml
+scan_mode: field
+
+field_sets:
+  - components: {ar: 90, cf4: 10}
+    pressures_bar: [1]
+    gap_mm: 0.150
+    reference_field_kv_cm: 39.8
+    field_scales: [1.0, 0.9, 0.75, 0.5]
+
+  - components: {ar: 95, cf4: 3, iso: 2}
+    pressures_bar: [1]
+    gap_mm: 0.150
+    fields_kv_cm: [29, 26.1, 21.75, 14.5]
+
+npe: 100
+workers: 2
+```
+
+Each set accepts either:
+
+- `fields_kv_cm`, containing the explicit fields; or
+- `reference_field_kv_cm` together with `field_scales`.
+
+`gap_mm` accepts one gap and `gaps_mm` accepts a list. Top-level `npe` applies
+to every set, while a set may override it with its own `npe`.
 
 Instead of a fixed `npe`, field mode may use:
 
@@ -600,8 +695,8 @@ CLI:
 --no-excitation-positions
 ```
 
-When enabled, the ROOT contains `hExcXY` and `hExcZT`. Disabling it reduces output
-size and some filling overhead, while retaining `hLevels`.
+When enabled, the ROOT contains `hExcXYZ` and `hExcZT`. Disabling it reduces
+output size and some filling overhead, while retaining `hLevels`.
 
 ### Magboltz transport
 
@@ -930,11 +1025,20 @@ The name contains:
 
 ### Alpha fits
 
+Machine-readable fit state:
+
 ```text
 outputs/alpha/<mixture>/gap_<gap>mm.json
 ```
 
-Space-charge fits use a distinct file/family.
+Human-auditable diagnostics and gain-1-to-10^7 extrapolations:
+
+```text
+fits/<mixture>/gap_<gap>mm/<composition>.pdf
+```
+
+Space-charge fits use distinct JSON and PDF families. No diagnostic PNG files
+are generated.
 
 ### GIFs
 
@@ -962,7 +1066,7 @@ Current production ROOT files contain:
 ```text
 hElectronEnergyDistribution
 hLevels
-hExcXY                    # optional
+hExcXYZ                   # optional
 hExcZT                    # optional
 dataPerPrimaryElectron
 dataPerElectron
@@ -996,25 +1100,31 @@ Despite the historical plot title `Excitation Distribution`, it is not a pure
 `type == excitation` histogram. This convention is retained for compatibility
 with the downstream photon/scintillation pipeline.
 
-### `hExcXY`
+### `hExcXYZ`
 
-Optional `256 × 256` integer histogram of transverse positions for generic
-inelastic and excitation channels (`type 3 + type 4`).
+Optional `128 × 128 × 128` integer histogram of the joint spatial positions for
+generic inelastic and excitation channels (`type 3 + type 4`).
 
 Limits:
 
 ```text
 x, y in [-2 × gap, +2 × gap]
+z in [0, gap]
 ```
+
+The three coordinates are filled together, so the complete spatial correlation
+`P(x, y, z)` is retained at the histogram resolution.
 
 ### `hExcZT`
 
-Optional `256 × 256` integer histogram of `z` versus `t` for generic inelastic
-and excitation channels. The time axis can extend when necessary.
+Optional `128 × 256` integer histogram of `z` versus `t` for generic inelastic
+and excitation channels. Its `z` bins match `hExcXYZ`; the time axis can extend
+when necessary.
 
 The compact histogram approach avoids storing one tree entry per excitation.
-Downstream sampling preserves the `x-y` and `z-t` correlations separately, but
-does not preserve a full four-dimensional correlation between all variables.
+Combining `hExcXYZ` with the conditional time distribution `P(t | z)` preserves
+the joint spatial distribution and the longitudinal-time correlation, but not
+residual `x-t` or `y-t` correlations.
 
 ### `dataPerPrimaryElectron`
 

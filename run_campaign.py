@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime, timezone
 from threading import Lock
@@ -27,8 +27,10 @@ import yaml
 
 from alpha_model import (
     AlphaPoint,
+    combine_duplicate_points,
     field_for_gain,
     fit_alpha,
+    fit_extrapolation_fraction,
     gain_to_alpha,
     read_fit,
     write_alpha_file,
@@ -45,6 +47,39 @@ GIF_OUTPUT = OUTPUTS / "gifs"
 LEGACY_ROOT_OUTPUT = OUTPUTS / "legacy_roots"
 ATTEMPT_LOG = OUTPUTS / "metadata" / "campaign_attempts.jsonl"
 
+_FIT_DIAGNOSTICS_IMPORT_ATTEMPTED = False
+_FIT_DIAGNOSTICS_GENERATOR = None
+_FIT_DIAGNOSTICS_IMPORT_ERROR: str | None = None
+_FIT_DIAGNOSTICS_WARNING_EMITTED = False
+
+
+def _load_fit_diagnostics_generator():
+    """Load the optional PDF backend without making campaigns depend on it."""
+    global _FIT_DIAGNOSTICS_IMPORT_ATTEMPTED
+    global _FIT_DIAGNOSTICS_GENERATOR
+    global _FIT_DIAGNOSTICS_IMPORT_ERROR
+    global _FIT_DIAGNOSTICS_WARNING_EMITTED
+
+    if not _FIT_DIAGNOSTICS_IMPORT_ATTEMPTED:
+        _FIT_DIAGNOSTICS_IMPORT_ATTEMPTED = True
+        try:
+            from fit_diagnostics import generate_family_fit_pdfs
+            _FIT_DIAGNOSTICS_GENERATOR = generate_family_fit_pdfs
+        except ModuleNotFoundError as error:
+            _FIT_DIAGNOSTICS_IMPORT_ERROR = error.name or str(error)
+
+    if _FIT_DIAGNOSTICS_GENERATOR is None and not _FIT_DIAGNOSTICS_WARNING_EMITTED:
+        _FIT_DIAGNOSTICS_WARNING_EMITTED = True
+        missing = _FIT_DIAGNOSTICS_IMPORT_ERROR or "plotting backend"
+        print(
+            "[WARNING] fits/ PDF generation is disabled because the optional "
+            f"Python package '{missing}' is missing. The campaign will continue. "
+            "Install it inside the project environment with: "
+            ".venv/bin/python -m pip install matplotlib",
+            file=sys.stderr,
+        )
+    return _FIT_DIAGNOSTICS_GENERATOR
+
 # Only the information needed to recover a physical (E, p, gap, gain) point
 # is mandatory.  Third-gas, transport, histogram and historical branches are
 # optional so older binary ROOT files remain reusable.
@@ -60,6 +95,10 @@ FIELD_FROM_NAME = re.compile(r"_(?P<field>[0-9]+(?:\.[0-9]+)?)kVcm_")
 
 class LegacyRootError(ValueError):
     """The ROOT belongs to an older output schema and must not be reused."""
+
+
+class FieldLimitReached(RuntimeError):
+    """The requested gain cannot be pursued without exceeding field limits."""
 
 
 GAS_ALIASES = {
@@ -130,6 +169,9 @@ class Target:
 class FieldTarget:
     pressure_bar: float
     field_v_cm: float
+    min_npe: int = 20
+    max_npe: int = 5000
+    target_relative_error: float = 0.03
 
 
 @dataclass(frozen=True)
@@ -138,6 +180,26 @@ class CampaignOptions:
     record_excitation_positions: bool = True
     measure_gas_transport: bool = False
     magboltz_collisions: int = 1
+
+
+@dataclass(frozen=True)
+class RefinementOptions:
+    min_field_kv_cm: float = 0.05
+    max_field_kv_cm: float = 500.0
+    max_reduced_field_kv_cm_bar: float = 500.0
+    min_field_step_kv_cm: float = 0.5
+    min_field_step_fraction: float = 0.01
+    max_field_step_fraction: float = 0.25
+    duplicate_field_tolerance: float = 0.001
+    max_refinement_attempts: int = 40
+
+    def bounds_v_cm(self, pressure_bar: float) -> tuple[float, float]:
+        minimum = 1000.0 * self.min_field_kv_cm
+        maximum = min(
+            1000.0 * self.max_field_kv_cm,
+            1000.0 * pressure_bar * self.max_reduced_field_kv_cm_bar,
+        )
+        return minimum, maximum
 
 
 @dataclass
@@ -407,7 +469,9 @@ def read_root(path: Path, *, field_v_cm: float | None = None) -> AlphaPoint:
             if not math.isfinite(field_v_cm):
                 field_v_cm = _field_from_root_name(path)
 
-        excitation_positions_enabled = "hExcXY" in names and "hExcZT" in names
+        excitation_positions_enabled = (
+            ("hExcXYZ" in names or "hExcXY" in names) and "hExcZT" in names
+        )
         transport_values = [
             float(scalar(tree, [name], math.nan))
             for name in (
@@ -575,8 +639,23 @@ def point_components(point: AlphaPoint) -> tuple[tuple[str, float], ...]:
 
 
 def save_alpha_for(
-    mixture: str, gap_mm: float, points: list[AlphaPoint], space_charge: bool
-) -> None:
+    mixture: str,
+    gap_mm: float,
+    points: list[AlphaPoint],
+    space_charge: bool,
+    *,
+    generate_diagnostics: bool = True,
+    fit_gain_min: float = 1.0,
+    fit_gain_max: float = 1.0e7,
+    only_composition: str | None = None,
+) -> dict[str, dict]:
+    """Rebuild the progressive fit and its auditable PDFs.
+
+    This is called after every new ROOT, so the following proposal always sees
+    the newest physical point. The PDF generation is deliberately colocated
+    with the JSON update: a fit cannot silently change without its diagnostic
+    changing too.
+    """
     selected = [
         point for point in points
         if point.mixture == mixture
@@ -586,6 +665,27 @@ def save_alpha_for(
     write_alpha_file(
         alpha_path(mixture, gap_mm, space_charge), mixture, gap_mm, selected
     )
+    if not generate_diagnostics:
+        return {}
+    generator = _load_fit_diagnostics_generator()
+    if generator is None:
+        return {}
+    try:
+        return generator(
+            mixture,
+            gap_mm,
+            selected,
+            space_charge=space_charge,
+            gain_min=fit_gain_min,
+            gain_max=fit_gain_max,
+            only_composition=only_composition,
+        )
+    except Exception as error:
+        print(
+            f"[WARNING] Could not update fits/ PDFs; the campaign will continue: {error}",
+            file=sys.stderr,
+        )
+        return {}
 
 
 def family_points(
@@ -642,9 +742,23 @@ def target_match(
     ]
     if not candidates:
         return None
-    best = min(candidates, key=lambda point: abs(point.gain - target.gain) / target.gain)
+
+    summaries = combine_duplicate_points(candidates)
+    if not summaries:
+        return None
+    best = min(
+        summaries,
+        key=lambda summary: abs(summary.gain - target.gain) / target.gain,
+    )
     difference = abs(best.gain - target.gain) / target.gain
-    return best if difference <= tolerance else None
+    if difference > tolerance:
+        return None
+
+    # Callers only need a real point to signal that the target is complete.
+    return min(
+        candidates,
+        key=lambda point: abs(point.field_v_cm - best.field_v_cm),
+    )
 
 
 def pending_targets(
@@ -670,35 +784,13 @@ def _reference_pressure(values: Iterable[float]) -> float:
 
 
 def _usable_alpha_fit(points: list[AlphaPoint]):
-    """Return a fit only after the seed points span a useful range.
-
-    The old scheduler placed one point at every pressure before a fit existed.
-    That transported an almost constant E/p to 2, 5 and 10 bar and could
-    overshoot the target gain by orders of magnitude.  We now first build the
-    reduced-alpha curve at one reference pressure.
-    """
+    """Return only a progressively selected and validated alpha fit."""
     fit = fit_alpha(points)
-    if fit is None or fit.n_points < 5:
+    if fit is None:
         return None
-
-    clean = [
-        point for point in points
-        if point.gain > 1.0
-        and point.reduced_field > 0.0
-        and math.isfinite(point.reduced_field)
-    ]
-    if len(clean) < 5:
+    if not fit.usable_for_prediction:
         return None
-
-    reduced_fields = [point.reduced_field for point in clean]
-    gains = [point.gain for point in clean]
-    field_span = max(reduced_fields) / max(min(reduced_fields), 1.0e-12)
-    gain_span = max(gains) / max(min(gains), 1.0e-12)
-
-    # A narrow cluster cannot determine a stable four-parameter curve.
-    if field_span < 1.15 or gain_span < 2.0:
-        return None
-    if not math.isfinite(fit.relative_rmse) or fit.relative_rmse > 0.60:
+    if fit.n_unique_points < 4:
         return None
     return fit
 
@@ -791,29 +883,386 @@ def select_target(points: list[AlphaPoint], pending: list[Target]) -> Target:
     return min(pending, key=distance)
 
 
+def _weighted_isotonic_log_gains(summaries: list[AlphaPoint]) -> list[AlphaPoint]:
+    """Return field-ordered points with non-decreasing, noise-smoothed gains.
+
+    A weighted pool-adjacent-violators algorithm is used on ln(G). Original
+    measurements are never changed on disk; this monotonic copy is used only by
+    the local field controller. It prevents one noisy inversion from creating a
+    physically impossible bracket.
+    """
+    ordered = sorted(summaries, key=lambda point: point.field_v_cm)
+    if not ordered:
+        return []
+
+    blocks: list[dict] = []
+    for index, point in enumerate(ordered):
+        relative_error = point.relative_gain_error
+        if not math.isfinite(relative_error) or relative_error <= 0.0:
+            relative_error = 0.15
+        statistical_weight = 1.0 / max(relative_error, 0.03) ** 2
+        # Cap the weight so a huge accumulated field cannot erase neighbouring
+        # physical information completely.
+        weight = float(np.clip(statistical_weight, 1.0, 2500.0))
+        blocks.append({
+            "start": index,
+            "stop": index + 1,
+            "weight": weight,
+            "value": math.log(point.gain),
+        })
+        while len(blocks) >= 2 and blocks[-2]["value"] > blocks[-1]["value"]:
+            right = blocks.pop()
+            left = blocks.pop()
+            total_weight = left["weight"] + right["weight"]
+            blocks.append({
+                "start": left["start"],
+                "stop": right["stop"],
+                "weight": total_weight,
+                "value": (
+                    left["weight"] * left["value"]
+                    + right["weight"] * right["value"]
+                ) / total_weight,
+            })
+
+    adjusted = [0.0] * len(ordered)
+    for block in blocks:
+        for index in range(block["start"], block["stop"]):
+            adjusted[index] = math.exp(block["value"])
+    return [replace(point, gain=gain) for point, gain in zip(ordered, adjusted)]
+
+
+def _monotonic_summaries(points: list[AlphaPoint]) -> list[AlphaPoint]:
+    return _weighted_isotonic_log_gains(combine_duplicate_points(points))
+
+
+def _gain_bracket(
+    summaries: list[AlphaPoint], target_gain: float,
+) -> tuple[AlphaPoint, AlphaPoint] | None:
+    """Return the narrowest field interval bracketing the requested gain."""
+    ordered = sorted(summaries, key=lambda point: point.field_v_cm)
+    candidates = []
+    for left, right in zip(ordered[:-1], ordered[1:]):
+        if left.gain <= target_gain <= right.gain and right.field_v_cm > left.field_v_cm:
+            candidates.append((left, right))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda pair: pair[1].field_v_cm - pair[0].field_v_cm)
+
+
 def interpolate_field(points: list[AlphaPoint], target: Target) -> float | None:
-    same_pressure = sorted(
-        [point for point in points if abs(point.pressure_bar - target.pressure_bar) < 1.0e-9],
-        key=lambda point: point.gain,
-    )
-    lower = [point for point in same_pressure if point.gain < target.gain]
-    upper = [point for point in same_pressure if point.gain > target.gain]
-    if not lower or not upper:
+    same_pressure = [
+        point for point in points
+        if abs(point.pressure_bar - target.pressure_bar) < 1.0e-9
+    ]
+    summaries = _monotonic_summaries(same_pressure)
+    bracket = _gain_bracket(summaries, target.gain)
+    if bracket is None:
         return None
 
-    left = max(lower, key=lambda point: point.gain)
-    right = min(upper, key=lambda point: point.gain)
-    if right.gain <= left.gain or right.field_v_cm <= left.field_v_cm:
-        return None
-
+    left, right = bracket
+    denominator = math.log(right.gain) - math.log(left.gain)
+    if denominator <= 1.0e-12:
+        return 0.5 * (left.field_v_cm + right.field_v_cm)
     fraction = (
-        (math.log(target.gain) - math.log(left.gain))
-        / (math.log(right.gain) - math.log(left.gain))
-    )
+        math.log(target.gain) - math.log(left.gain)
+    ) / denominator
+    # A safeguarded regula-falsi step. Staying away from the exact bracket edge
+    # guarantees that the interval contracts after the next measurement.
+    fraction = float(np.clip(fraction, 0.10, 0.90))
     return left.field_v_cm + fraction * (right.field_v_cm - left.field_v_cm)
 
 
-def propose_field(points: list[AlphaPoint], target: Target, gap_mm: float) -> float:
+def _same_pressure_points(
+    points: list[AlphaPoint], target: Target,
+) -> list[AlphaPoint]:
+    return sorted(
+        (
+            point for point in points
+            if abs(point.pressure_bar - target.pressure_bar) < 1.0e-9
+            and point.gain > 1.0
+            and math.isfinite(point.gain)
+            and point.field_v_cm > 0.0
+            and math.isfinite(point.field_v_cm)
+        ),
+        key=lambda point: point.field_v_cm,
+    )
+
+
+def _edge_log_gain_extrapolation(
+    summaries: list[AlphaPoint], target_gain: float, *, upwards: bool,
+) -> float | None:
+    """Robust local extrapolation of ln(G) versus E at a measured edge."""
+    ordered = _weighted_isotonic_log_gains(summaries)
+    if len(ordered) < 2:
+        return None
+
+    edge = ordered[-1] if upwards else ordered[0]
+    neighbours = list(reversed(ordered[:-1])) if upwards else ordered[1:]
+    slopes = []
+    for neighbour in neighbours[:4]:
+        if upwards:
+            delta_e = edge.field_v_cm - neighbour.field_v_cm
+            delta_log_gain = math.log(edge.gain) - math.log(neighbour.gain)
+        else:
+            delta_e = neighbour.field_v_cm - edge.field_v_cm
+            delta_log_gain = math.log(neighbour.gain) - math.log(edge.gain)
+        if delta_e > 1.0e-9 and delta_log_gain > 1.0e-6:
+            slopes.append(delta_log_gain / delta_e)
+    if not slopes:
+        return None
+
+    slope = float(np.median(slopes))
+    proposal = edge.field_v_cm + math.log(target_gain / edge.gain) / slope
+    return proposal if math.isfinite(proposal) else None
+
+
+def _enforce_refinement_direction(
+    field: float,
+    same_pressure: list[AlphaPoint],
+    target: Target,
+    refinement: RefinementOptions,
+) -> tuple[float, str | None]:
+    """Force an unbracketed target beyond the correct measured field edge."""
+    summaries = _monotonic_summaries(same_pressure)
+    if not summaries:
+        return field, None
+
+    lower = [summary for summary in summaries if summary.gain < target.gain]
+    upper = [summary for summary in summaries if summary.gain > target.gain]
+    min_step_abs = 1000.0 * refinement.min_field_step_kv_cm
+
+    if lower and not upper:
+        edge = summaries[-1]
+        extrapolated = _edge_log_gain_extrapolation(
+            summaries, target.gain, upwards=True
+        )
+        field = extrapolated if extrapolated is not None else max(field, edge.field_v_cm)
+        minimum_next = edge.field_v_cm + max(
+            min_step_abs, refinement.min_field_step_fraction * edge.field_v_cm,
+        )
+        maximum_next = edge.field_v_cm * (1.0 + refinement.max_field_step_fraction)
+        return float(np.clip(field, minimum_next, maximum_next)), (
+            "same-pressure monotonic upper-edge extrapolation"
+        )
+
+    if upper and not lower:
+        edge = summaries[0]
+        extrapolated = _edge_log_gain_extrapolation(
+            summaries, target.gain, upwards=False
+        )
+        field = extrapolated if extrapolated is not None else min(field, edge.field_v_cm)
+        maximum_next = edge.field_v_cm - max(
+            min_step_abs, refinement.min_field_step_fraction * edge.field_v_cm,
+        )
+        minimum_next = edge.field_v_cm * (1.0 - refinement.max_field_step_fraction)
+        return float(np.clip(field, minimum_next, maximum_next)), (
+            "same-pressure monotonic lower-edge extrapolation"
+        )
+
+    return field, None
+
+
+def _duplicate_radius(field_v_cm: float, refinement: RefinementOptions) -> float:
+    return max(
+        1.0,
+        refinement.duplicate_field_tolerance * max(abs(field_v_cm), 1.0),
+    )
+
+
+def _field_is_occupied(
+    field: float, summaries: list[AlphaPoint], refinement: RefinementOptions,
+) -> bool:
+    return any(
+        abs(summary.field_v_cm - field)
+        <= _duplicate_radius(summary.field_v_cm, refinement)
+        for summary in summaries
+    )
+
+
+def _free_field_inside_bracket(
+    preferred: float,
+    left: AlphaPoint,
+    right: AlphaPoint,
+    summaries: list[AlphaPoint],
+    refinement: RefinementOptions,
+) -> float | None:
+    """Find an unused point inside a measured gain bracket.
+
+    The old duplicate protection could move away from one occupied field and
+    land exactly on another one. Here all occupied exclusion zones are merged
+    first, and the widest genuinely free interval is selected.
+    """
+    lower = left.field_v_cm
+    upper = right.field_v_cm
+    if upper <= lower:
+        return None
+
+    forbidden: list[tuple[float, float]] = []
+    for summary in summaries:
+        radius = _duplicate_radius(summary.field_v_cm, refinement)
+        start = max(lower, summary.field_v_cm - radius)
+        stop = min(upper, summary.field_v_cm + radius)
+        if stop > start:
+            forbidden.append((start, stop))
+    forbidden.sort()
+
+    merged: list[list[float]] = []
+    for start, stop in forbidden:
+        if not merged or start > merged[-1][1]:
+            merged.append([start, stop])
+        else:
+            merged[-1][1] = max(merged[-1][1], stop)
+
+    free: list[tuple[float, float]] = []
+    cursor = lower
+    for start, stop in merged:
+        if start > cursor:
+            free.append((cursor, start))
+        cursor = max(cursor, stop)
+    if cursor < upper:
+        free.append((cursor, upper))
+
+    usable = [interval for interval in free if interval[1] - interval[0] > 1.0]
+    if not usable:
+        return None
+
+    def interval_score(interval: tuple[float, float]) -> tuple[float, float]:
+        start, stop = interval
+        distance = 0.0
+        if preferred < start:
+            distance = start - preferred
+        elif preferred > stop:
+            distance = preferred - stop
+        return distance, -(stop - start)
+
+    start, stop = min(usable, key=interval_score)
+    candidate = float(np.clip(preferred, start, stop))
+    margin = min(1.0, 0.25 * (stop - start))
+    candidate = float(np.clip(candidate, start + margin, stop - margin))
+    return candidate
+
+
+def _avoid_duplicate_field(
+    field: float,
+    same_pressure: list[AlphaPoint],
+    target: Target,
+    refinement: RefinementOptions,
+) -> float:
+    occupied_summaries = combine_duplicate_points(same_pressure)
+    if not occupied_summaries or not _field_is_occupied(
+        field, occupied_summaries, refinement
+    ):
+        return field
+
+    monotonic_summaries = _weighted_isotonic_log_gains(occupied_summaries)
+    bracket = _gain_bracket(monotonic_summaries, target.gain)
+    if bracket is not None:
+        candidate = _free_field_inside_bracket(
+            field, bracket[0], bracket[1], occupied_summaries, refinement
+        )
+        if candidate is not None:
+            return candidate
+
+    nearest = min(
+        occupied_summaries, key=lambda summary: abs(summary.field_v_cm - field)
+    )
+    if all(summary.gain < target.gain for summary in occupied_summaries):
+        direction = 1.0
+    elif all(summary.gain > target.gain for summary in occupied_summaries):
+        direction = -1.0
+    else:
+        direction = 1.0 if nearest.gain < target.gain else -1.0
+
+    candidate = field
+    for _ in range(len(occupied_summaries) + 3):
+        collisions = [
+            summary for summary in occupied_summaries
+            if abs(summary.field_v_cm - candidate)
+            <= _duplicate_radius(summary.field_v_cm, refinement)
+        ]
+        if not collisions:
+            return candidate
+        obstacle = min(
+            collisions, key=lambda summary: abs(summary.field_v_cm - candidate)
+        )
+        step = max(
+            1000.0 * refinement.min_field_step_kv_cm,
+            refinement.min_field_step_fraction * obstacle.field_v_cm,
+        )
+        candidate = obstacle.field_v_cm + direction * step
+
+    return candidate
+
+def _enforce_last_attempt_progress(
+    field: float,
+    same_pressure: list[AlphaPoint],
+    last_attempt: AlphaPoint | None,
+    target: Target,
+    refinement: RefinementOptions,
+) -> tuple[float, str | None]:
+    """Force the next refinement to move in the direction required by the
+    immediately preceding attempt for this exact target.
+
+    Model fits and old noisy points are never allowed to override this rule:
+    a gain above target must lower E, and a gain below target must raise E.
+    """
+    if last_attempt is None or last_attempt.gain <= 0.0:
+        return field, None
+    if abs(last_attempt.pressure_bar - target.pressure_bar) > 1.0e-9:
+        return field, None
+
+    if math.isclose(last_attempt.gain, target.gain, rel_tol=1.0e-12):
+        return field, None
+
+    direction = -1.0 if last_attempt.gain > target.gain else 1.0
+    step = max(
+        1000.0 * refinement.min_field_step_kv_cm,
+        refinement.min_field_step_fraction * last_attempt.field_v_cm,
+    )
+    if direction < 0.0:
+        nearest_allowed = last_attempt.field_v_cm - step
+        furthest_allowed = last_attempt.field_v_cm * (
+            1.0 - refinement.max_field_step_fraction
+        )
+        field = float(np.clip(field, furthest_allowed, nearest_allowed))
+        method = "last-attempt forced downward step"
+    else:
+        nearest_allowed = last_attempt.field_v_cm + step
+        furthest_allowed = last_attempt.field_v_cm * (
+            1.0 + refinement.max_field_step_fraction
+        )
+        field = float(np.clip(field, nearest_allowed, furthest_allowed))
+        method = "last-attempt forced upward step"
+
+    summaries = combine_duplicate_points(same_pressure)
+    candidate = field
+    for _ in range(len(summaries) + 4):
+        collisions = [
+            summary for summary in summaries
+            if abs(summary.field_v_cm - candidate)
+            <= _duplicate_radius(summary.field_v_cm, refinement)
+        ]
+        if not collisions:
+            return candidate, method
+        obstacle = min(
+            collisions, key=lambda summary: abs(summary.field_v_cm - candidate)
+        )
+        obstacle_step = max(
+            1000.0 * refinement.min_field_step_kv_cm,
+            refinement.min_field_step_fraction * obstacle.field_v_cm,
+        )
+        candidate = obstacle.field_v_cm + direction * obstacle_step
+
+    return candidate, method
+
+
+def propose_field(
+    points: list[AlphaPoint],
+    target: Target,
+    gap_mm: float,
+    refinement: RefinementOptions,
+    last_attempt: AlphaPoint | None = None,
+) -> float:
     # 1. Direct interpolation at the same pressure is the safest prediction.
     interpolated = interpolate_field(points, target)
     if interpolated is not None:
@@ -821,14 +1270,21 @@ def propose_field(points: list[AlphaPoint], target: Target, gap_mm: float) -> fl
         predictor = "same-pressure interpolation"
     else:
         # 2. The reduced-alpha model is used only after a broad reference-pressure
-        # seed exists.  Its inversion explicitly targets alpha_eff / p.
+        # seed exists. Its inversion explicitly targets alpha_eff / p.
         fit = _usable_alpha_fit(points)
         if fit is not None:
             try:
                 field = field_for_gain(
                     fit, target.pressure_bar, gap_mm, target.gain
                 )
-                predictor = "reduced-alpha fit"
+                extrapolation = fit_extrapolation_fraction(
+                    fit, target.pressure_bar, field
+                )
+                if extrapolation > 0.75:
+                    raise ValueError(
+                        "target lies too far outside the measured E/p range"
+                    )
+                predictor = f"{fit.model_label} reduced-alpha fit"
             except ValueError:
                 field = math.nan
                 predictor = "fit inversion failed"
@@ -836,15 +1292,9 @@ def propose_field(points: list[AlphaPoint], target: Target, gap_mm: float) -> fl
             field = math.nan
             predictor = "reference-pressure seed"
 
-        same_pressure = [
-            point for point in points
-            if abs(point.pressure_bar - target.pressure_bar) < 1.0e-9
-            and point.gain > 1.0
-            and math.isfinite(point.gain)
-        ]
+        same_pressure = _same_pressure_points(points, target)
 
         # 3. Without a valid fit, only use measurements at the SAME pressure.
-        # Never transport a constant reduced field between pressures.
         if not math.isfinite(field) and same_pressure:
             nearest = min(
                 same_pressure,
@@ -857,10 +1307,8 @@ def propose_field(points: list[AlphaPoint], target: Target, gap_mm: float) -> fl
             field = nearest.field_v_cm * factor
             predictor = "same-pressure rescaling"
 
-        # 4. If a campaign contains too few gain targets to build the full fit,
-        # transport a point using REDUCED alpha, not a constant E/p.  For the
-        # same gain, alpha_target is fixed but alpha_target/p decreases as p
-        # rises, so the proposed E/p must also decrease.
+        # 4. For sparse pressure coverage, transport reduced alpha rather than
+        # a constant E/p.
         if not math.isfinite(field) and points:
             nearest = min(
                 (point for point in points if point.gain > 1.0),
@@ -889,9 +1337,7 @@ def propose_field(points: list[AlphaPoint], target: Target, gap_mm: float) -> fl
                 )
                 predictor = "reduced-alpha fallback"
 
-        # 5. First seed for a completely new family.  The scheduler calls this
-        # at the pressure closest to 1 bar and obtains several seed points there
-        # before any pressure extrapolation is attempted.
+        # 5. First seed for a completely new family.
         if not math.isfinite(field):
             target_alpha = gain_to_alpha(target.gain, gap_mm)
             reduced_field_kv = float(np.clip(
@@ -901,24 +1347,79 @@ def propose_field(points: list[AlphaPoint], target: Target, gap_mm: float) -> fl
             ))
             field = 1000.0 * target.pressure_bar * reduced_field_kv
 
-    same_pressure = [
-        point for point in points
-        if abs(point.pressure_bar - target.pressure_bar) < 1.0e-9
-    ]
-    if same_pressure:
-        nearest_field = min(
-            same_pressure, key=lambda point: abs(point.field_v_cm - field)
-        )
-        denominator = max(abs(nearest_field.field_v_cm), 1.0)
-        if abs(nearest_field.field_v_cm - field) / denominator < 0.005:
-            field = nearest_field.field_v_cm * (
-                1.06 if nearest_field.gain < target.gain else 0.94
+    same_pressure = _same_pressure_points(points, target)
+
+    # A fit is never allowed to point back inside the measured range when every
+    # point is on the same side of the requested gain.  This is what previously
+    # caused scans to hover around ~50 kV/cm indefinitely.
+    field, direction_predictor = _enforce_refinement_direction(
+        field, same_pressure, target, refinement
+    )
+    if direction_predictor:
+        predictor = direction_predictor
+
+    field = _avoid_duplicate_field(
+        field, same_pressure, target, refinement
+    )
+
+    # Absolute safety rule: the newest result for this exact target determines
+    # the sign of the next field change. A global fit or an old outlier may
+    # choose the magnitude, but never the wrong direction.
+    field, last_attempt_predictor = _enforce_last_attempt_progress(
+        field, same_pressure, last_attempt, target, refinement
+    )
+    if last_attempt_predictor:
+        predictor = last_attempt_predictor
+
+    minimum_field, maximum_field = refinement.bounds_v_cm(target.pressure_bar)
+    occupied_summaries = combine_duplicate_points(same_pressure)
+    summaries = _weighted_isotonic_log_gains(occupied_summaries)
+    below_only = bool(summaries) and all(
+        summary.gain < target.gain for summary in summaries
+    )
+    above_only = bool(summaries) and all(
+        summary.gain > target.gain for summary in summaries
+    )
+
+    if below_only:
+        edge = max(summaries, key=lambda summary: summary.field_v_cm)
+        if edge.field_v_cm >= maximum_field * (1.0 - 1.0e-9):
+            raise FieldLimitReached(
+                f"Target gain {target.gain:g} remains above the measured gain "
+                f"{edge.gain:g} at the configured maximum field "
+                f"{maximum_field / 1000.0:g} kV/cm"
+            )
+    if above_only:
+        edge = min(summaries, key=lambda summary: summary.field_v_cm)
+        if edge.field_v_cm <= minimum_field * (1.0 + 1.0e-9):
+            raise FieldLimitReached(
+                f"Target gain {target.gain:g} remains below the measured gain "
+                f"{edge.gain:g} at the configured minimum field "
+                f"{minimum_field / 1000.0:g} kV/cm"
+            )
+
+    unclipped_field = field
+    field = float(np.clip(field, minimum_field, maximum_field))
+    hit_limit = not math.isclose(
+        field, unclipped_field, rel_tol=1.0e-12, abs_tol=1.0e-9
+    )
+
+    # Never silently rerun the edge point after clipping to a limit.
+    if occupied_summaries and _field_is_occupied(
+        field, occupied_summaries, refinement
+    ):
+        if below_only and math.isclose(field, maximum_field, rel_tol=1.0e-9):
+            raise FieldLimitReached(
+                f"The next refinement for target gain {target.gain:g} would "
+                f"exceed max_field_kv_cm={maximum_field / 1000.0:g}"
+            )
+        if above_only and math.isclose(field, minimum_field, rel_tol=1.0e-9):
+            raise FieldLimitReached(
+                f"The next refinement for target gain {target.gain:g} would "
+                f"fall below min_field_kv_cm={minimum_field / 1000.0:g}"
             )
 
     reduced_field_kv = (field / 1000.0) / target.pressure_bar
-    reduced_field_kv = float(np.clip(reduced_field_kv, 0.05, 500.0))
-    field = 1000.0 * target.pressure_bar * reduced_field_kv
-
     emit(
         "prediction",
         pressure_bar=target.pressure_bar,
@@ -926,18 +1427,25 @@ def propose_field(points: list[AlphaPoint], target: Target, gap_mm: float) -> fl
         field_v_cm=field,
         reduced_field_kv_cm_bar=reduced_field_kv,
         predictor=predictor,
+        field_limited=hit_limit,
+        minimum_field_kv_cm=minimum_field / 1000.0,
+        maximum_field_kv_cm=maximum_field / 1000.0,
     )
     return field
 
-
 def adaptive_npe(gap_mm: float, target_gain: float) -> tuple[int, int, float]:
-    # The cost roughly follows gain * gap * npe. Low gains and short gaps can
-    # therefore accumulate much more statistics than expensive avalanches.
-    transport_budget = 3000.0
+    """Choose enough statistics for a meaningful gain refinement.
+
+    The former budget frequently capped high-gain runs at exactly 20 primaries,
+    making a 5 % gain target statistically impossible. Exploration still starts
+    cheaply, but the simulator may now accumulate a useful error estimate.
+    """
+    transport_budget = 60000.0
     max_npe = int(transport_budget / max(gap_mm * target_gain, 1.0e-6))
-    max_npe = int(np.clip(max_npe, 20, 5000))
+    minimum_cap = 30 if target_gain >= 1.0e5 else 50
+    max_npe = int(np.clip(max_npe, minimum_cap, 5000))
     min_npe = min(20, max_npe)
-    return min_npe, max_npe, 0.03
+    return min_npe, max_npe, 0.04
 
 
 def log_saved_attempt(
@@ -979,6 +1487,119 @@ def log_saved_attempt(
     ATTEMPT_LOG.parent.mkdir(parents=True, exist_ok=True)
     with ATTEMPT_LOG.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def _history_key(
+    mixture: str,
+    composition: str,
+    gap_mm: float,
+    pressure_bar: float,
+    target_gain: float,
+    space_charge: bool,
+) -> tuple:
+    return (
+        mixture,
+        composition,
+        round(float(gap_mm), 9),
+        round(float(pressure_bar), 9),
+        round(float(target_gain), 9),
+        bool(space_charge),
+    )
+
+
+def load_last_gain_attempts() -> dict[tuple, tuple[AlphaPoint, int, bool]]:
+    """Recover target-specific refinement state across GUI/process restarts.
+
+    The final integer is the JSONL line number and therefore a stable ordering
+    even when old records lack or contain malformed timestamps.
+    """
+    recovered: dict[tuple, tuple[AlphaPoint, int, bool]] = {}
+    if not ATTEMPT_LOG.exists():
+        return recovered
+
+    for line_number, line in enumerate(
+        ATTEMPT_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+    ):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("scan_mode") != "gain":
+            continue
+        requested_gain = record.get("requested_gain")
+        if not isinstance(requested_gain, (int, float)) or requested_gain <= 0.0:
+            continue
+        try:
+            mixture = str(record["mixture"])
+            composition = str(record["composition_key"])
+            pressure_bar = float(record["pressure_bar"])
+            gap_mm = float(record["gap_mm"])
+            field_v_cm = float(record["field_v_cm"])
+            measured_gain = float(record["measured_gain"])
+            gain_error = float(record.get("gain_error", math.nan))
+            npe = int(record.get("npe", 1))
+            space_charge = bool(record.get("space_charge", False))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not all(math.isfinite(value) for value in (
+            pressure_bar, gap_mm, field_v_cm, measured_gain,
+        )):
+            continue
+
+        components = record.get("components", [])
+        fraction = 0.0
+        if isinstance(components, list) and len(components) > 1:
+            try:
+                fraction = float(components[1].get("fraction_pct", 0.0))
+            except (TypeError, ValueError, AttributeError):
+                fraction = 0.0
+        alpha = gain_to_alpha(measured_gain, gap_mm)
+        alpha_error = (
+            gain_error / (measured_gain * 0.1 * gap_mm)
+            if measured_gain > 1.0 and gain_error >= 0.0 and math.isfinite(gain_error)
+            else math.nan
+        )
+        point = AlphaPoint(
+            mixture=mixture,
+            fraction=fraction,
+            pressure_bar=pressure_bar,
+            gap_mm=gap_mm,
+            field_v_cm=field_v_cm,
+            gain=measured_gain,
+            gain_error=gain_error,
+            alpha_effective=alpha,
+            alpha_error=alpha_error,
+            npe=max(npe, 1),
+            root=str(record.get("root", "")),
+            composition=composition,
+            components=components if isinstance(components, list) else [],
+        )
+        point.space_charge_enabled = space_charge
+        key = _history_key(
+            mixture, composition, gap_mm, pressure_bar,
+            float(requested_gain), space_charge,
+        )
+        recovered[key] = (point, line_number, bool(record.get("accepted", False)))
+    return recovered
+
+
+def last_attempt_for_target(
+    recovered: dict[tuple, tuple[AlphaPoint, int, bool]],
+    family: Family,
+    target: Target,
+    options: CampaignOptions,
+) -> tuple[AlphaPoint | None, int, bool]:
+    value = recovered.get(_history_key(
+        family.mixture,
+        family.composition,
+        family.gap_mm,
+        target.pressure_bar,
+        target.gain,
+        options.space_charge,
+    ))
+    if value is None:
+        return None, -1, False
+    return value
 
 
 def root_directory(family: Family) -> Path:
@@ -1161,7 +1782,121 @@ def run_job(job: Job) -> AlphaPoint:
     return point
 
 
+def _float_values(raw, *, label: str) -> list[float]:
+    if isinstance(raw, (int, float)):
+        values = [float(raw)]
+    elif isinstance(raw, list):
+        values = [float(value) for value in raw]
+    else:
+        raise ValueError(f"{label} must be a number or a non-empty list")
+    if not values:
+        raise ValueError(f"{label} must not be empty")
+    return values
+
+
+def _set_pressures(config: dict, entry: dict, *, label: str) -> list[float]:
+    raw = entry.get("pressures_bar", config.get("pressures_bar"))
+    if raw is None:
+        raise ValueError(f"{label} requires pressures_bar")
+    pressures = _float_values(raw, label=f"{label}.pressures_bar")
+    if any(value <= 0.0 for value in pressures):
+        raise ValueError(f"{label}.pressures_bar values must be positive")
+    return pressures
+
+
+def _set_gaps(entry: dict, *, label: str) -> list[float]:
+    has_gap = "gap_mm" in entry
+    has_gaps = "gaps_mm" in entry
+    if has_gap == has_gaps:
+        raise ValueError(
+            f"{label} must contain exactly one of gap_mm or gaps_mm"
+        )
+    raw = entry["gap_mm"] if has_gap else entry["gaps_mm"]
+    gaps = _float_values(raw, label=f"{label}.gap_mm")
+    if any(value <= 0.0 for value in gaps):
+        raise ValueError(f"{label} gap values must be positive")
+    return gaps
+
+
+def _set_components(entry: dict, *, label: str):
+    raw = entry.get("components")
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{label}.components must be a non-empty mapping")
+    components = normalize_components(raw)
+    return mixture_name_from_components(components), components
+
+
+def _field_values_kv_cm(entry: dict, *, label: str) -> list[float]:
+    direct = entry.get("fields_kv_cm")
+    has_reference = "reference_field_kv_cm" in entry
+    has_scales = "field_scales" in entry
+    if direct is not None and (has_reference or has_scales):
+        raise ValueError(
+            f"{label} cannot mix fields_kv_cm with "
+            "reference_field_kv_cm/field_scales"
+        )
+    if direct is not None:
+        fields = _float_values(direct, label=f"{label}.fields_kv_cm")
+    else:
+        if not (has_reference and has_scales):
+            raise ValueError(
+                f"{label} requires fields_kv_cm or both "
+                "reference_field_kv_cm and field_scales"
+            )
+        reference = float(entry["reference_field_kv_cm"])
+        scales = _float_values(entry["field_scales"], label=f"{label}.field_scales")
+        fields = [reference * scale for scale in scales]
+    if any(value <= 0.0 for value in fields):
+        raise ValueError(f"{label} electric fields must be positive")
+    # Preserve the YAML order while avoiding accidental duplicate jobs.
+    return list(dict.fromkeys(round(value, 12) for value in fields))
+
+
+def _field_statistics(config: dict, entry: dict | None = None) -> tuple[int, int, float]:
+    statistics_keys = ("npe", "min_npe", "max_npe", "target_relative_error")
+    source = dict(config)
+    if entry is not None and any(key in entry for key in statistics_keys):
+        for key in statistics_keys:
+            source.pop(key, None)
+        for key in statistics_keys:
+            if key in entry:
+                source[key] = entry[key]
+    return direct_field_npe(source)
+
+
 def campaign_targets(config: dict) -> tuple[list[Family], dict[Family, list[Target]]]:
+    raw_sets = config.get("gain_sets")
+    if raw_sets is not None:
+        if not isinstance(raw_sets, list) or not raw_sets:
+            raise ValueError("gain_sets must be a non-empty list")
+        families: list[Family] = []
+        targets: dict[Family, list[Target]] = {}
+        for index, entry in enumerate(raw_sets):
+            label = f"gain_sets[{index}]"
+            if not isinstance(entry, dict):
+                raise ValueError(f"{label} must be a mapping")
+            mixture, components = _set_components(entry, label=label)
+            pressures = _set_pressures(config, entry, label=label)
+            gaps = _set_gaps(entry, label=label)
+            raw_gains = entry.get("gain_targets", entry.get("gain_target"))
+            if raw_gains is None:
+                raise ValueError(f"{label} requires gain_targets")
+            gains = _float_values(raw_gains, label=f"{label}.gain_targets")
+            gains = [gain for gain in gains if gain > 1.0]
+            if not gains:
+                raise ValueError(f"{label}.gain_targets must contain values above 1")
+            for gap_mm in gaps:
+                family = Family(mixture, components, gap_mm)
+                if family not in targets:
+                    families.append(family)
+                    targets[family] = []
+                targets[family].extend(
+                    Target(pressure, gain)
+                    for pressure in pressures
+                    for gain in gains
+                )
+        return families, targets
+
     pressures = [float(value) for value in config["pressures_bar"]]
     gaps = {float(gap): [float(gain) for gain in gains]
             for gap, gains in config["gaps_mm"].items()}
@@ -1180,20 +1915,52 @@ def campaign_targets(config: dict) -> tuple[list[Family], dict[Family, list[Targ
             ]
     return families, targets
 
+
 def field_campaign_targets(
     config: dict,
 ) -> tuple[list[Family], dict[Family, list[FieldTarget]]]:
+    raw_sets = config.get("field_sets")
+    if raw_sets is not None:
+        if not isinstance(raw_sets, list) or not raw_sets:
+            raise ValueError("field_sets must be a non-empty list")
+        families: list[Family] = []
+        targets: dict[Family, list[FieldTarget]] = {}
+        for index, entry in enumerate(raw_sets):
+            label = f"field_sets[{index}]"
+            if not isinstance(entry, dict):
+                raise ValueError(f"{label} must be a mapping")
+            mixture, components = _set_components(entry, label=label)
+            pressures = _set_pressures(config, entry, label=label)
+            gaps = _set_gaps(entry, label=label)
+            fields_kv_cm = _field_values_kv_cm(entry, label=label)
+            min_npe, max_npe, target_error = _field_statistics(config, entry)
+            for gap_mm in gaps:
+                family = Family(mixture, components, gap_mm)
+                if family not in targets:
+                    families.append(family)
+                    targets[family] = []
+                targets[family].extend(
+                    FieldTarget(
+                        pressure, 1000.0 * field_kv_cm,
+                        min_npe, max_npe, target_error,
+                    )
+                    for pressure in pressures
+                    for field_kv_cm in fields_kv_cm
+                )
+        return families, targets
+
     pressures = [float(value) for value in config["pressures_bar"]]
     raw_fields = config.get("fields_kv_cm")
     if not isinstance(raw_fields, dict) or not raw_fields:
         raise ValueError(
-            "field mode requires fields_kv_cm, for example: "
+            "field mode requires field_sets or fields_kv_cm, for example: "
             "fields_kv_cm: {0.05: [35]}"
         )
     fields_by_gap = {
         float(gap): [1000.0 * float(field) for field in fields]
         for gap, fields in raw_fields.items()
     }
+    min_npe, max_npe, target_error = _field_statistics(config)
 
     families: list[Family] = []
     targets: dict[Family, list[FieldTarget]] = {}
@@ -1202,7 +1969,9 @@ def field_campaign_targets(
             family = Family(mixture, components, gap_mm)
             families.append(family)
             targets[family] = [
-                FieldTarget(pressure, field_v_cm)
+                FieldTarget(
+                    pressure, field_v_cm, min_npe, max_npe, target_error
+                )
                 for pressure in pressures
                 for field_v_cm in fields_v_cm
                 if field_v_cm > 0.0
@@ -1257,19 +2026,23 @@ def run_field_campaign(
     workers: int,
     height_factor: float,
     options: CampaignOptions,
+    generate_fit_diagnostics: bool = True,
+    fit_gain_min: float = 1.0,
+    fit_gain_max: float = 1.0e7,
 ) -> None:
     """Run every requested field exactly once.
 
-    Field mode deliberately has no alpha fit, no field prediction, no gain
-    tolerance and no reuse of old ROOT files.  The electric field is the input;
-    the measured gain is only an output.
+    Field mode never changes the requested electric field and does not use a
+    gain tolerance or reuse an old ROOT as a completed target.  The measured
+    gain is nevertheless added to the shared alpha database and its diagnostic
+    PDF is regenerated, so fixed-field scans also improve future predictions.
     """
-    min_npe, max_npe, target_error = direct_field_npe(config)
     jobs_to_run = [
         (family, target)
         for family in families
         for target in targets_by_family[family]
     ]
+    diagnostic_points = scan_roots() if generate_fit_diagnostics else []
 
     emit(
         "campaign_started",
@@ -1299,9 +2072,9 @@ def run_field_campaign(
                     family=family,
                     target=target,
                     field_v_cm=target.field_v_cm,
-                    min_npe=min_npe,
-                    max_npe=max_npe,
-                    target_relative_error=target_error,
+                    min_npe=target.min_npe,
+                    max_npe=target.max_npe,
+                    target_relative_error=target.target_relative_error,
                     height_factor=height_factor,
                     options=options,
                     job_id=job_id,
@@ -1343,6 +2116,19 @@ def run_field_campaign(
 
                 completed += 1
                 log_saved_attempt(job, point, accepted=True)
+                diagnostic_points.append(point)
+                fit_artifacts = save_alpha_for(
+                    family.mixture,
+                    family.gap_mm,
+                    diagnostic_points,
+                    options.space_charge,
+                    generate_diagnostics=generate_fit_diagnostics,
+                    fit_gain_min=fit_gain_min,
+                    fit_gain_max=fit_gain_max,
+                    only_composition=family.composition,
+                )
+                artifact = fit_artifacts.get(family.composition, {})
+                selected_fit = artifact.get("fit")
                 emit(
                     "result",
                     job_id=job.job_id,
@@ -1360,6 +2146,13 @@ def run_field_campaign(
                     npe=point.npe,
                     accepted=True,
                     root=point.root,
+                    fit_pdf=artifact.get("path", ""),
+                    fit_model=(selected_fit.model_label if selected_fit else "insufficient data"),
+                    fit_status=(selected_fit.fit_status if selected_fit else "insufficient_points"),
+                    fit_unique_points=(selected_fit.n_unique_points if selected_fit else 0),
+                    fit_root_runs=(selected_fit.n_runs if selected_fit else 0),
+                    fit_cv_median=(selected_fit.cv_median_factor if selected_fit else None),
+                    fit_cv_max=(selected_fit.cv_max_factor if selected_fit else None),
                 )
 
     remaining = len(jobs_to_run) - completed
@@ -1387,9 +2180,38 @@ def run_campaign(
     scan_mode = str(config.get("scan_mode", "gain")).strip().lower()
     if scan_mode not in {"gain", "field"}:
         raise ValueError("scan_mode must be 'gain' or 'field'")
+    if scan_mode == "field" and "gain_sets" in config:
+        raise ValueError("gain_sets requires scan_mode: gain")
+    if scan_mode == "gain" and "field_sets" in config:
+        raise ValueError("field_sets requires scan_mode: field")
     tolerance = float(config.get("gain_tolerance", 0.05))
     height_factor = float(config.get("height_factor", 1.5))
     workers = worker_count(config.get("workers", "auto"))
+    generate_fit_diagnostics = bool(config.get("generate_fit_diagnostics", True))
+    fit_gain_min = float(config.get("fit_gain_min", 1.0))
+    fit_gain_max = float(config.get("fit_gain_max", 1.0e7))
+    if fit_gain_min < 1.0 or fit_gain_max <= fit_gain_min:
+        raise ValueError("fit_gain_min/max must satisfy 1 <= min < max")
+    refinement = RefinementOptions(
+        min_field_kv_cm=float(config.get("min_field_kv_cm", 0.05)),
+        max_field_kv_cm=float(config.get("max_field_kv_cm", 500.0)),
+        max_reduced_field_kv_cm_bar=float(
+            config.get("max_reduced_field_kv_cm_bar", 500.0)
+        ),
+        min_field_step_kv_cm=float(config.get("min_field_step_kv_cm", 0.5)),
+        min_field_step_fraction=float(
+            config.get("min_field_step_fraction", 0.01)
+        ),
+        max_field_step_fraction=float(
+            config.get("max_field_step_fraction", 0.25)
+        ),
+        duplicate_field_tolerance=float(
+            config.get("duplicate_field_tolerance", 0.001)
+        ),
+        max_refinement_attempts=int(
+            config.get("max_refinement_attempts", 40)
+        ),
+    )
     options = CampaignOptions(
         space_charge=(
             bool(config.get("space_charge", False))
@@ -1413,6 +2235,25 @@ def run_campaign(
         raise ValueError("height_factor must be at least 1")
     if options.magboltz_collisions < 1:
         raise ValueError("magboltz_collisions must be at least 1")
+    if refinement.min_field_kv_cm <= 0.0:
+        raise ValueError("min_field_kv_cm must be positive")
+    if refinement.max_field_kv_cm <= refinement.min_field_kv_cm:
+        raise ValueError("max_field_kv_cm must exceed min_field_kv_cm")
+    if refinement.max_reduced_field_kv_cm_bar <= 0.0:
+        raise ValueError("max_reduced_field_kv_cm_bar must be positive")
+    if refinement.min_field_step_kv_cm <= 0.0:
+        raise ValueError("min_field_step_kv_cm must be positive")
+    if not 0.0 < refinement.min_field_step_fraction < 1.0:
+        raise ValueError("min_field_step_fraction must be between 0 and 1")
+    if not 0.0 < refinement.max_field_step_fraction < 1.0:
+        raise ValueError("max_field_step_fraction must be between 0 and 1")
+    if refinement.max_field_step_fraction < refinement.min_field_step_fraction:
+        raise ValueError(
+            "max_field_step_fraction must not be smaller than "
+            "min_field_step_fraction"
+        )
+    if refinement.max_refinement_attempts < 1:
+        raise ValueError("max_refinement_attempts must be at least 1")
 
     if not skip_build:
         build_project(workers)
@@ -1428,14 +2269,22 @@ def run_campaign(
             workers=workers,
             height_factor=height_factor,
             options=options,
+            generate_fit_diagnostics=generate_fit_diagnostics,
+            fit_gain_min=fit_gain_min,
+            fit_gain_max=fit_gain_max,
         )
         return
 
     families, targets_by_family = campaign_targets(config)
     points = scan_roots()
-    for mixture in config["mixtures"]:
+    for mixture in dict.fromkeys(family.mixture for family in families):
         for gap_mm in {family.gap_mm for family in families if family.mixture == mixture}:
-            save_alpha_for(mixture, gap_mm, points, options.space_charge)
+            save_alpha_for(
+                mixture, gap_mm, points, options.space_charge,
+                generate_diagnostics=generate_fit_diagnostics,
+                fit_gain_min=fit_gain_min,
+                fit_gain_max=fit_gain_max,
+            )
 
     emit(
         "campaign_started",
@@ -1449,6 +2298,9 @@ def run_campaign(
         record_excitation_positions=options.record_excitation_positions,
         measure_gas_transport=options.measure_gas_transport,
         magboltz_collisions=options.magboltz_collisions,
+        fits_directory="fits",
+        fit_gain_min=fit_gain_min,
+        fit_gain_max=fit_gain_max,
     )
 
     active: dict[Future, Job] = {}
@@ -1458,6 +2310,24 @@ def run_campaign(
     # Keep a missed target at the front of its family queue so the field is
     # corrected immediately instead of opening unrelated pressures first.
     priority_target: dict[Family, Target] = {}
+    refinement_attempts: dict[tuple[Family, Target], int] = {}
+    last_attempt_point: dict[tuple[Family, Target], AlphaPoint] = {}
+    recovered_attempts = load_last_gain_attempts()
+    for family in families:
+        newest: tuple[int, Target] | None = None
+        for target in targets_by_family[family]:
+            point, order, accepted = last_attempt_for_target(
+                recovered_attempts, family, target, options
+            )
+            if point is not None and not accepted:
+                last_attempt_point[(family, target)] = point
+                if newest is None or order > newest[0]:
+                    newest = (order, target)
+        if newest is not None:
+            priority_target[family] = newest[1]
+    blocked_targets: set[tuple[Family, Target]] = set()
+    reported_exhausted: set[tuple[Family, Target]] = set()
+    diagnostic_job_id = -1
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         while not STOP_REQUESTED:
@@ -1474,14 +2344,38 @@ def run_campaign(
                 if not pending:
                     continue
 
-                # Twenty points at one pressure are enough to identify a problem
-                # without allowing an accidental infinite autoscan.
+                for exhausted_target in pending:
+                    key = (family, exhausted_target)
+                    if (
+                        refinement_attempts.get(key, 0)
+                        >= refinement.max_refinement_attempts
+                        and key not in reported_exhausted
+                    ):
+                        reported_exhausted.add(key)
+                        emit(
+                            "failed",
+                            job_id=diagnostic_job_id,
+                            scan_mode="gain",
+                            mixture=family.mixture,
+                            composition=family.composition_label,
+                            composition_key=family.composition,
+                            gap_mm=family.gap_mm,
+                            pressure_bar=exhausted_target.pressure_bar,
+                            target_gain=exhausted_target.gain,
+                            attempt=refinement_attempts.get(key, 0),
+                            will_retry=False,
+                            error=(
+                                "Maximum refinement attempts reached: "
+                                f"{refinement.max_refinement_attempts}"
+                            ),
+                        )
+                        diagnostic_job_id -= 1
+
                 possible = [
                     target for target in pending
-                    if sum(
-                        abs(point.pressure_bar - target.pressure_bar) < 1.0e-9
-                        for point in current_points
-                    ) < 20
+                    if (family, target) not in blocked_targets
+                    and refinement_attempts.get((family, target), 0)
+                        < refinement.max_refinement_attempts
                     and failure_count.get((family, target), 0) < 3
                 ]
                 if not possible:
@@ -1493,7 +2387,30 @@ def run_campaign(
                 else:
                     priority_target.pop(family, None)
                     target = select_target(current_points, possible)
-                field = propose_field(current_points, target, family.gap_mm)
+                try:
+                    field = propose_field(
+                        current_points, target, family.gap_mm, refinement,
+                        last_attempt=last_attempt_point.get((family, target)),
+                    )
+                except FieldLimitReached as error:
+                    blocked_targets.add((family, target))
+                    priority_target.pop(family, None)
+                    emit(
+                        "failed",
+                        job_id=diagnostic_job_id,
+                        scan_mode="gain",
+                        mixture=family.mixture,
+                        composition=family.composition_label,
+                        composition_key=family.composition,
+                        gap_mm=family.gap_mm,
+                        pressure_bar=target.pressure_bar,
+                        target_gain=target.gain,
+                        attempt=refinement_attempts.get((family, target), 0),
+                        will_retry=False,
+                        error=str(error),
+                    )
+                    diagnostic_job_id -= 1
+                    continue
                 min_npe, max_npe, target_error = adaptive_npe(
                     family.gap_mm, target.gain
                 )
@@ -1549,10 +2466,23 @@ def run_campaign(
                     )
                     continue
 
-                points.append(point)
-                save_alpha_for(
-                    family.mixture, family.gap_mm, points, options.space_charge
+                refinement_attempts[(family, requested_target)] = (
+                    refinement_attempts.get((family, requested_target), 0) + 1
                 )
+                last_attempt_point[(family, requested_target)] = point
+                points.append(point)
+                fit_artifacts = save_alpha_for(
+                    family.mixture,
+                    family.gap_mm,
+                    points,
+                    options.space_charge,
+                    generate_diagnostics=generate_fit_diagnostics,
+                    fit_gain_min=fit_gain_min,
+                    fit_gain_max=fit_gain_max,
+                    only_composition=family.composition,
+                )
+                artifact = fit_artifacts.get(family.composition, {})
+                selected_fit = artifact.get("fit")
                 matched = target_match(
                     family_points(points, family, options), requested_target,
                     tolerance, options,
@@ -1561,6 +2491,7 @@ def run_campaign(
                     priority_target[family] = requested_target
                 else:
                     priority_target.pop(family, None)
+                    last_attempt_point.pop((family, requested_target), None)
                 log_saved_attempt(job, point, accepted=matched is not None)
                 emit(
                     "result",
@@ -1578,6 +2509,13 @@ def run_campaign(
                     npe=point.npe,
                     accepted=matched is not None,
                     root=point.root,
+                    fit_pdf=artifact.get("path", ""),
+                    fit_model=(selected_fit.model_label if selected_fit else "insufficient data"),
+                    fit_status=(selected_fit.fit_status if selected_fit else "insufficient_points"),
+                    fit_unique_points=(selected_fit.n_unique_points if selected_fit else 0),
+                    fit_root_runs=(selected_fit.n_runs if selected_fit else 0),
+                    fit_cv_median=(selected_fit.cv_median_factor if selected_fit else None),
+                    fit_cv_max=(selected_fit.cv_max_factor if selected_fit else None),
                 )
 
     remaining = 0
@@ -1694,7 +2632,7 @@ def parser() -> argparse.ArgumentParser:
         "--excitation-positions",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Enable/disable hExcXY and hExcZT in campaign ROOT files.",
+        help="Enable/disable hExcXYZ and hExcZT in campaign ROOT files.",
     )
     command.add_argument(
         "--gas-transport",

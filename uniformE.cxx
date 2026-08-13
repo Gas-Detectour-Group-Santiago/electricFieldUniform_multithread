@@ -24,6 +24,7 @@
 #include <TH1D.h>
 #include <TH2D.h>
 #include <TH2I.h>
+#include <TH3.h>
 #include <TLatex.h>
 #include <TLine.h>
 #include <TMath.h>
@@ -54,7 +55,8 @@ constexpr int kInelasticType = 3;
 constexpr int kExcitationType = 4;
 constexpr int kSuperelasticType = 5;
 constexpr int kEnergyBins = 1000;
-constexpr int kExcitationBins = 256;
+constexpr int kExcitationSpatialBins = 128;
+constexpr int kExcitationTimeBins = 256;
 constexpr Long64_t kMaxEnergySamples = 200000;
 constexpr double kInitialTimeRangeNs = 10.0;
 constexpr double kSpaceChargeToleranceCm = 1.0e-5;
@@ -317,7 +319,7 @@ struct CollisionRecorder {
   // non-elastic collision term (type != 0). No redundant per-gas or per-type
   // level histograms are written.
   TH1D* h_levels = nullptr;
-  TH2I* h_xy = nullptr;
+  TH3I* h_xyz = nullptr;
   TH2I* h_zt = nullptr;
   const std::vector<LevelInfo>* level_info = nullptr;
   bool keep_ions = false;
@@ -342,9 +344,9 @@ struct CollisionRecorder {
 
   void reset(TH1D& levels,
              const std::vector<LevelInfo>& levels_info,
-             TH2I* xy, TH2I* zt, const bool store_ions) {
+             TH3I* xyz, TH2I* zt, const bool store_ions) {
     h_levels = &levels;
-    h_xy = xy;
+    h_xyz = xyz;
     h_zt = zt;
     level_info = &levels_info;
     keep_ions = store_ions;
@@ -437,8 +439,9 @@ struct CollisionRecorder {
       } else if (component_slot == 1) {
         ++n_excitation_like_gas2;
       }
-      if (h_xy != nullptr && std::isfinite(x) && std::isfinite(y)) {
-        h_xy->Fill(x, y);
+      if (h_xyz != nullptr && std::isfinite(x) && std::isfinite(y) &&
+          std::isfinite(z)) {
+        h_xyz->Fill(x, y, z);
       }
       if (h_zt != nullptr && std::isfinite(z) && std::isfinite(t)) {
         h_zt->Fill(z, t);
@@ -1005,17 +1008,22 @@ int main(int argc, char* argv[]) {
     TH1D h_levels(
         "hLevels", "Excitation Distribution;hLevel;excitations",
         n_levels, 0.0, static_cast<double>(n_levels));
-    std::unique_ptr<TH2I> h_exc_xy;
+    std::unique_ptr<TH3I> h_exc_xyz;
     std::unique_ptr<TH2I> h_exc_zt;
     if (config.record_excitation_positions) {
-      h_exc_xy = std::make_unique<TH2I>(
-          "hExcXY", "Inelastic/excitation transverse distribution;x [cm];y [cm]",
-          kExcitationBins, -config.xy_half_width_cm(), config.xy_half_width_cm(),
-          kExcitationBins, -config.xy_half_width_cm(), config.xy_half_width_cm());
+      h_exc_xyz = std::make_unique<TH3I>(
+          "hExcXYZ",
+          "Inelastic/excitation spatial distribution;x [cm];y [cm];z [cm]",
+          kExcitationSpatialBins, -config.xy_half_width_cm(),
+          config.xy_half_width_cm(),
+          kExcitationSpatialBins, -config.xy_half_width_cm(),
+          config.xy_half_width_cm(),
+          kExcitationSpatialBins, 0.0, config.gap_cm());
       h_exc_zt = std::make_unique<TH2I>(
-          "hExcZT", "Inelastic/excitation longitudinal-time distribution;z [cm];t [ns]",
-          kExcitationBins, 0.0, config.z_max_cm(),
-          kExcitationBins, 0.0, kInitialTimeRangeNs);
+          "hExcZT",
+          "Inelastic/excitation longitudinal-time distribution;z [cm];t [ns]",
+          kExcitationSpatialBins, 0.0, config.gap_cm(),
+          kExcitationTimeBins, 0.0, kInitialTimeRangeNs);
       h_exc_zt->SetCanExtend(TH1::kYaxis);
     }
 
@@ -1038,7 +1046,7 @@ int main(int argc, char* argv[]) {
 
     g_energy.reset();
     g_collisions.reset(
-        h_levels, level_info, h_exc_xy.get(), h_exc_zt.get(),
+        h_levels, level_info, h_exc_xyz.get(), h_exc_zt.get(),
         config.space_charge || config.make_gif);
 
     AvalancheMicroscopic avalanche;
@@ -1253,8 +1261,8 @@ int main(int argc, char* argv[]) {
     output.cd();
     h_electron_energy.Write("hElectronEnergyDistribution", TObject::kOverwrite);
     h_levels.Write("hLevels", TObject::kOverwrite);
-    if (h_exc_xy != nullptr) {
-      h_exc_xy->Write("hExcXY", TObject::kOverwrite);
+    if (h_exc_xyz != nullptr) {
+      h_exc_xyz->Write("hExcXYZ", TObject::kOverwrite);
     }
     if (h_exc_zt != nullptr) {
       h_exc_zt->Write("hExcZT", TObject::kOverwrite);
@@ -1270,7 +1278,7 @@ int main(int argc, char* argv[]) {
     // pointers (which caused the TH2I double-delete crash, exit code 139).
     h_electron_energy.SetDirectory(nullptr);
     h_levels.SetDirectory(nullptr);
-    if (h_exc_xy != nullptr) h_exc_xy->SetDirectory(nullptr);
+    if (h_exc_xyz != nullptr) h_exc_xyz->SetDirectory(nullptr);
     if (h_exc_zt != nullptr) h_exc_zt->SetDirectory(nullptr);
     data_per_primary.SetDirectory(nullptr);
     data_per_electron.SetDirectory(nullptr);

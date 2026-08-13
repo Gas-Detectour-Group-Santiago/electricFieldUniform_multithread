@@ -8,8 +8,8 @@ import json
 import re
 import sys
 
-from PySide6.QtCore import QProcess, QSettings, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QProcess, QSettings, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -108,7 +108,7 @@ class CampaignTab(QWidget):
         )
         self.excitation_positions = QCheckBox("Excitation positions")
         self.excitation_positions.setToolTip(
-            "Write hExcXY and hExcZT. hLevels and the total excitation count "
+            "Write hExcXYZ and hExcZT. hLevels and the total excitation count "
             "are kept even when this is disabled."
         )
         self.gas_transport = QCheckBox("Magboltz transport")
@@ -124,6 +124,9 @@ class CampaignTab(QWidget):
         self.zoom_reset_button = QPushButton("100 %")
         self.zoom_in_button = QPushButton("A+")
         self.toggle_yaml_button = QPushButton("Hide YAML")
+        self.open_fits_button = QPushButton("Open fits/")
+        self.open_fit_button = QPushButton("Open selected fit")
+        self.open_fit_button.setEnabled(False)
         self.run_button = QPushButton("Run campaign")
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
@@ -134,6 +137,8 @@ class CampaignTab(QWidget):
         self.zoom_reset_button.clicked.connect(self.reset_font_size)
         self.zoom_in_button.clicked.connect(lambda: self.change_font_size(+1))
         self.toggle_yaml_button.clicked.connect(self.toggle_yaml)
+        self.open_fits_button.clicked.connect(self.open_fits_directory)
+        self.open_fit_button.clicked.connect(self.open_selected_fit)
         self.run_button.clicked.connect(self.run)
         self.stop_button.clicked.connect(self.stop)
 
@@ -156,6 +161,9 @@ class CampaignTab(QWidget):
         buttons.addWidget(self.zoom_reset_button)
         buttons.addWidget(self.zoom_in_button)
         buttons.addWidget(self.toggle_yaml_button)
+        buttons.addSpacing(12)
+        buttons.addWidget(self.open_fits_button)
+        buttons.addWidget(self.open_fit_button)
         buttons.addStretch()
         buttons.addWidget(self.run_button)
         buttons.addWidget(self.stop_button)
@@ -167,20 +175,22 @@ class CampaignTab(QWidget):
         options.addWidget(self.gas_transport)
         options.addStretch()
 
-        self.table = QTableWidget(0, 11)
+        self.table = QTableWidget(0, 12)
         self.table.setHorizontalHeaderLabels([
             "Mixture", "Composition", "p [bar]", "gap [mm]", "Target",
-            "E [kV/cm]", "Gain", "npe", "Progress", "Status", "Details",
+            "E [kV/cm]", "Gain", "npe", "Progress", "Status", "Fit", "Details",
         ])
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(42)
+        self.table.itemSelectionChanged.connect(self.update_fit_button)
+        self.table.cellDoubleClicked.connect(lambda *_: self.open_selected_fit())
         header = self.table.horizontalHeader()
         header.setMinimumSectionSize(70)
         header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setSectionResizeMode(10, QHeaderView.Stretch)
+        header.setSectionResizeMode(11, QHeaderView.Stretch)
         self.table.setColumnWidth(0, 105)
         self.table.setColumnWidth(1, 245)
         self.table.setColumnWidth(2, 85)
@@ -191,6 +201,7 @@ class CampaignTab(QWidget):
         self.table.setColumnWidth(7, 75)
         self.table.setColumnWidth(8, 280)
         self.table.setColumnWidth(9, 135)
+        self.table.setColumnWidth(10, 235)
 
         simulations_panel = QWidget()
         simulations_layout = QVBoxLayout(simulations_panel)
@@ -230,6 +241,7 @@ class CampaignTab(QWidget):
         self.accepted_targets: set[tuple] = set()
         self.running_jobs: set[int] = set()
         self.saved_attempts = 0
+        self.row_fit_paths: dict[int, Path] = {}
 
         self.progress = QProgressBar()
         self.progress.setMinimumHeight(30)
@@ -326,6 +338,8 @@ class CampaignTab(QWidget):
         self.space_charge.setEnabled(not running)
         self.excitation_positions.setEnabled(not running)
         self.gas_transport.setEnabled(not running)
+        self.open_fits_button.setEnabled(True)
+        self.update_fit_button()
 
     def run(self):
         self.save_yaml()
@@ -340,6 +354,8 @@ class CampaignTab(QWidget):
         self.accepted_targets.clear()
         self.running_jobs.clear()
         self.saved_attempts = 0
+        self.row_fit_paths.clear()
+        self.open_fit_button.setEnabled(False)
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
         self.progress.setFormat("Configuring and building uniformE…")
@@ -571,6 +587,22 @@ class CampaignTab(QWidget):
 
         field = event.get("field_v_cm")
         field_kv_cm = "" if field is None else float(field) / 1000.0
+        fit_text = ""
+        if event_type == "result" and event.get("fit_pdf"):
+            model = str(event.get("fit_model", ""))
+            unique = int(event.get("fit_unique_points", 0) or 0)
+            runs = int(event.get("fit_root_runs", 0) or 0)
+            cv = event.get("fit_cv_median")
+            cv_text = (
+                f" · CV ×{float(cv):.2f}"
+                if isinstance(cv, (int, float)) and cv == cv and cv != float("inf")
+                else ""
+            )
+            fit_text = f"{model} · {unique} fields/{runs} ROOTs{cv_text}"
+            fit_pdf = str(event.get("fit_pdf", "")).strip()
+            if fit_pdf:
+                self.row_fit_paths[row] = ROOT / fit_pdf
+
         values = [
             event.get("mixture", ""),
             event.get("composition", ""),
@@ -582,6 +614,7 @@ class CampaignTab(QWidget):
             event.get("npe", ""),
             "",
             status,
+            fit_text,
             details,
         ]
         for column, value in enumerate(values):
@@ -607,13 +640,33 @@ class CampaignTab(QWidget):
 
         if event_type == "failed":
             error = event.get("error", "Unknown error")
-            for column in (9, 10):
+            for column in (9, 11):
                 item = self.table.item(row, column)
                 if item is not None:
                     item.setToolTip(error)
             self.status.setText(details)
 
         self.update_campaign_progress()
+
+    def open_fits_directory(self):
+        path = ROOT / "fits"
+        path.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def update_fit_button(self):
+        row = self.table.currentRow()
+        self.open_fit_button.setEnabled(
+            row >= 0 and row in self.row_fit_paths
+            and self.row_fit_paths[row].exists()
+        )
+
+    def open_selected_fit(self):
+        row = self.table.currentRow()
+        path = self.row_fit_paths.get(row)
+        if path is None or not path.exists():
+            self.update_fit_button()
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def finished(self, exit_code, *_):
         self.set_running_controls(False)

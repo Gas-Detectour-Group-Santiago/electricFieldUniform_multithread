@@ -30,6 +30,18 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
+# PDF diagnostics are optional for the physical simulation, but install the
+# plotting backend automatically when possible so fits/ is available on the
+# first run. A failed installation no longer prevents the GUI or campaign from
+# starting; run_campaign.py will simply skip PDF generation and print one clear
+# warning.
+if ! python3 -c "import matplotlib" >/dev/null 2>&1; then
+  echo "[setup] matplotlib is missing; installing it in $PROJECT_DIR/.venv ..." >&2
+  if ! python3 -m pip install --disable-pip-version-check matplotlib; then
+    echo "[warning] matplotlib could not be installed. Simulations will still run, but fits/ PDFs will be skipped." >&2
+  fi
+fi
+
 # Use the Qt libraries bundled with PySide6, while preserving ROOT/Garfield
 # library paths already present in LD_LIBRARY_PATH.
 PYSIDE6_DIR="$(
