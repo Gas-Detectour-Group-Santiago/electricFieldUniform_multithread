@@ -401,9 +401,23 @@ The command-line runtime flags can override the YAML/default state:
 ```bash
 python3 run_campaign.py campaign.yaml \
   --no-space-charge \
+  --penning \
   --excitation-positions \
   --no-gas-transport
 ```
+
+Penning transfer can also be selected directly in the YAML:
+
+```yaml
+penning: false  # use true to enable Garfield++ Penning transfer
+```
+
+With `penning: true`, `uniformE` calls `MediumMagboltz::EnablePenningTransfer()`
+after the gas has been initialised. Garfield++ then uses its built-in
+parameterisation for the current mixture when one is available. With
+`penning: false`, `MediumMagboltz::DisablePenningTransfer()` is called
+explicitly. Penning-on and Penning-off ROOT points are kept as separate
+physics families and are never mixed in the alpha fits.
 
 ---
 
@@ -827,6 +841,7 @@ The runner currently defines these binary mixture families:
 | `ArCH4` | Ar | CH4 |
 | `ArIso` | Ar | iC4H10 |
 | `ArC2H2F4` | Ar | C2H2F4 |
+| `ArXe` | Ar | Xe |
 
 The number in the YAML is always the percentage of the **second gas**.
 
@@ -1254,6 +1269,7 @@ For fast gain refinement:
 
 ```text
 Space charge          OFF
+Penning transfer      OFF unless it is part of the physics study
 Magboltz transport    OFF
 Excitation positions  OFF if not needed
 ```

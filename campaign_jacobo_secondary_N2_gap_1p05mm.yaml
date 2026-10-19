@@ -1,0 +1,118 @@
+scan_mode: field
+
+measure_gas_transport: false
+
+record_excitation_positions: false
+
+space_charge: false
+
+# Jacobo 2026 secondary-scintillation campaign
+# Gas family: Ar-N2
+# Amplification gap: 1.05 mm = 0.105 cm
+# Electric-field conversion: E [kV/cm] = V [V] / 105
+# Each field_set uses the highest measured voltage as reference_field_kv_cm.
+# field_scales are the exact experimental voltage ratios V/Vmax.
+# A 0 V measurement is retained as field_scale: 0.0 to reproduce all measured conditions.
+# X-ray settings encoded in source-folder names: 20 mA, 20 kV.
+
+field_sets:
+
+  # Ar-N2: concentration scan at 1 bar
+
+  # source_folder: N2-0.5%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 800, 1000, 1200, 1230]
+  # corresponding_fields_kv_cm: [0, 7.619048, 9.52381, 11.428571, 11.714286]
+  - components: {ar: 99.5, n2: 0.5}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 11.714286
+    field_scales: [0.650407, 0.813008, 0.97561, 1]
+
+  # source_folder: N2-1%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 800, 1000, 1250]
+  # corresponding_fields_kv_cm: [0, 7.619048, 9.52381, 11.904762]
+  - components: {ar: 99, n2: 1}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 11.904762
+    field_scales: [0.64, 0.8, 1]
+
+  # source_folder: N2-2%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 800, 1000, 1250]
+  # corresponding_fields_kv_cm: [0, 7.619048, 9.52381, 11.904762]
+  - components: {ar: 98, n2: 2}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 11.904762
+    field_scales: [0.64, 0.8, 1]
+
+  # source_folder: N2-5%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 800, 1000, 1300]
+  # corresponding_fields_kv_cm: [0, 7.619048, 9.52381, 12.380952]
+  - components: {ar: 95, n2: 5}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 12.380952
+    field_scales: [0.615385, 0.769231, 1]
+
+  # source_folder: N2-10%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 800, 1000, 1400]
+  # corresponding_fields_kv_cm: [0, 7.619048, 9.52381, 13.333333]
+  - components: {ar: 90, n2: 10}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 13.333333
+    field_scales: [0.571429, 0.714286, 1]
+
+  # source_folder: N2-20%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 1000, 1300, 1500]
+  # corresponding_fields_kv_cm: [0, 9.52381, 12.380952, 14.285714]
+  - components: {ar: 80, n2: 20}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 14.285714
+    field_scales: [0.666667, 0.866667, 1]
+
+  # source_folder: N2-100%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 1000, 2000, 2500]
+  # corresponding_fields_kv_cm: [0, 9.52381, 19.047619, 23.809524]
+  - components: {n2: 100}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 23.809524
+    field_scales: [0.4, 0.8, 1]
+
+  # Ar-N2: pressure scan at fixed 10% N2
+
+  # source_folder: N2-10%-0.5bar-20mA-20kV
+  # measured_voltages_V: [0, 800, 1000, 1100]
+  # corresponding_fields_kv_cm: [0, 7.619048, 9.52381, 10.47619]
+  - components: {ar: 90, n2: 10}
+    pressures_bar: [0.5]
+    gap_mm: 1.05
+    reference_field_kv_cm: 10.476190
+    field_scales: [0.727273, 0.909091, 1]
+
+  # source_folder: N2-10%-2bar-20mA-20kV
+  # measured_voltages_V: [0, 1500]
+  # corresponding_fields_kv_cm: [0, 14.285714]
+  - components: {ar: 90, n2: 10}
+    pressures_bar: [2]
+    gap_mm: 1.05
+    reference_field_kv_cm: 14.285714
+    field_scales: [1]
+
+  # source_folder: N2-10%-5bar-20mA-20kV
+  # measured_voltages_V: [0, 2000]
+  # corresponding_fields_kv_cm: [0, 19.047619]
+  - components: {ar: 90, n2: 10}
+    pressures_bar: [5]
+    gap_mm: 1.05
+    reference_field_kv_cm: 19.047619
+    field_scales: [1]
+
+# Fixed statistics: every requested field is simulated with exactly 100 primary electrons.
+# Field mode never changes the requested electric field.
+npe: 100
+
+workers: 2

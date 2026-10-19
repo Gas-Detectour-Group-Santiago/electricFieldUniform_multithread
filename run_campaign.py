@@ -106,6 +106,8 @@ GAS_ALIASES = {
     "argon": "ar",
     "he": "he",
     "helium": "he",
+    "xe": "xe",
+    "xenon": "xe",
     "cf4": "cf4",
     "n2": "n2",
     "co2": "co2",
@@ -119,6 +121,7 @@ GAS_ALIASES = {
 GAS_DISPLAY = {
     "ar": "Ar",
     "he": "He",
+    "xe": "Xe",
     "cf4": "CF4",
     "n2": "N2",
     "co2": "CO2",
@@ -177,6 +180,7 @@ class FieldTarget:
 @dataclass(frozen=True)
 class CampaignOptions:
     space_charge: bool = False
+    penning: bool = False
     record_excitation_positions: bool = True
     measure_gas_transport: bool = False
     magboltz_collisions: int = 1
@@ -447,6 +451,7 @@ def read_root(path: Path, *, field_v_cm: float | None = None) -> AlphaPoint:
         gap_mm = float(scalar(tree, ["gap_mm"], math.nan))
         npe = int(scalar(tree, ["npe"], 0))
         space_charge_enabled = bool(scalar(tree, ["spaceCharge"], False))
+        penning_enabled = bool(scalar(tree, ["penning"], False))
 
         primary = root_file["dataPerPrimaryElectron"]
         if "ne" not in primary:
@@ -518,6 +523,7 @@ def read_root(path: Path, *, field_v_cm: float | None = None) -> AlphaPoint:
         components=component_dicts(components),
     )
     point.space_charge_enabled = space_charge_enabled
+    point.penning_enabled = penning_enabled
     point.excitation_positions_enabled = excitation_positions_enabled
     point.gas_transport_enabled = gas_transport_enabled
     return point
@@ -569,6 +575,7 @@ def read_field_result(path: Path, job: Job) -> AlphaPoint:
         components=component_dicts(job.family.components),
     )
     point.space_charge_enabled = job.options.space_charge
+    point.penning_enabled = job.options.penning
     point.excitation_positions_enabled = job.options.record_excitation_positions
     point.gas_transport_enabled = job.options.measure_gas_transport
     return point
@@ -611,8 +618,17 @@ def scan_roots() -> list[AlphaPoint]:
     return points
 
 
-def alpha_path(mixture: str, gap_mm: float, space_charge: bool = False) -> Path:
-    suffix = "_spacecharge" if space_charge else ""
+def alpha_path(
+    mixture: str,
+    gap_mm: float,
+    space_charge: bool = False,
+    penning: bool = False,
+) -> Path:
+    suffix = ""
+    if space_charge:
+        suffix += "_spacecharge"
+    if penning:
+        suffix += "_penning"
     return ALPHA_OUTPUT / mixture / f"gap_{gap_mm:.3f}mm{suffix}.json"
 
 
@@ -643,6 +659,7 @@ def save_alpha_for(
     gap_mm: float,
     points: list[AlphaPoint],
     space_charge: bool,
+    penning: bool = False,
     *,
     generate_diagnostics: bool = True,
     fit_gain_min: float = 1.0,
@@ -661,9 +678,10 @@ def save_alpha_for(
         if point.mixture == mixture
         and abs(point.gap_mm - gap_mm) < 1.0e-9
         and point_flag(point, "space_charge_enabled") == space_charge
+        and point_flag(point, "penning_enabled") == penning
     ]
     write_alpha_file(
-        alpha_path(mixture, gap_mm, space_charge), mixture, gap_mm, selected
+        alpha_path(mixture, gap_mm, space_charge, penning), mixture, gap_mm, selected
     )
     if not generate_diagnostics:
         return {}
@@ -676,6 +694,7 @@ def save_alpha_for(
             gap_mm,
             selected,
             space_charge=space_charge,
+            penning=penning,
             gain_min=fit_gain_min,
             gain_max=fit_gain_max,
             only_composition=only_composition,
@@ -691,14 +710,16 @@ def save_alpha_for(
 def family_points(
     points: list[AlphaPoint], family: Family, options: CampaignOptions
 ) -> list[AlphaPoint]:
-    # Only space charge changes the avalanche physics and therefore the alpha
-    # family. The two measurement toggles affect output content, not gain.
+    # Space charge and Penning transfer change the avalanche physics and
+    # therefore define separate alpha families. The measurement toggles affect
+    # output content only, not gain.
     return [
         point for point in points
         if point.mixture == family.mixture
         and point_composition(point) == family.composition
         and abs(point.gap_mm - family.gap_mm) < 1.0e-9
         and point_flag(point, "space_charge_enabled") == options.space_charge
+        and point_flag(point, "penning_enabled") == options.penning
         and point.gain > 1.0
         and math.isfinite(point.gain)
     ]
@@ -716,6 +737,7 @@ def field_family_points(
         and point_composition(point) == family.composition
         and abs(point.gap_mm - family.gap_mm) < 1.0e-9
         and point_flag(point, "space_charge_enabled") == options.space_charge
+        and point_flag(point, "penning_enabled") == options.penning
     ]
 
 
@@ -1481,6 +1503,7 @@ def log_saved_attempt(
         "accepted": bool(accepted),
         "npe": point.npe,
         "space_charge": job.options.space_charge,
+        "penning": job.options.penning,
         "record_excitation_positions": job.options.record_excitation_positions,
         "measure_gas_transport": job.options.measure_gas_transport,
     }
@@ -1496,6 +1519,7 @@ def _history_key(
     pressure_bar: float,
     target_gain: float,
     space_charge: bool,
+    penning: bool,
 ) -> tuple:
     return (
         mixture,
@@ -1504,6 +1528,7 @@ def _history_key(
         round(float(pressure_bar), 9),
         round(float(target_gain), 9),
         bool(space_charge),
+        bool(penning),
     )
 
 
@@ -1539,6 +1564,7 @@ def load_last_gain_attempts() -> dict[tuple, tuple[AlphaPoint, int, bool]]:
             gain_error = float(record.get("gain_error", math.nan))
             npe = int(record.get("npe", 1))
             space_charge = bool(record.get("space_charge", False))
+            penning = bool(record.get("penning", False))
         except (KeyError, TypeError, ValueError):
             continue
         if not all(math.isfinite(value) for value in (
@@ -1575,9 +1601,10 @@ def load_last_gain_attempts() -> dict[tuple, tuple[AlphaPoint, int, bool]]:
             components=components if isinstance(components, list) else [],
         )
         point.space_charge_enabled = space_charge
+        point.penning_enabled = penning
         key = _history_key(
             mixture, composition, gap_mm, pressure_bar,
-            float(requested_gain), space_charge,
+            float(requested_gain), space_charge, penning,
         )
         recovered[key] = (point, line_number, bool(record.get("accepted", False)))
     return recovered
@@ -1596,6 +1623,7 @@ def last_attempt_for_target(
         target.pressure_bar,
         target.gain,
         options.space_charge,
+        options.penning,
     ))
     if value is None:
         return None, -1, False
@@ -1672,6 +1700,7 @@ def run_job(job: Job) -> AlphaPoint:
         gas3,
         f"{comp3:.12g}",
         str(job.options.magboltz_collisions),
+        str(int(job.options.penning)),
     ]
 
     target_gain = job.target.gain if isinstance(job.target, Target) else None
@@ -2053,6 +2082,7 @@ def run_field_campaign(
         workers=workers,
         tolerance=None,
         space_charge=options.space_charge,
+        penning=options.penning,
         record_excitation_positions=options.record_excitation_positions,
         measure_gas_transport=options.measure_gas_transport,
         magboltz_collisions=options.magboltz_collisions,
@@ -2122,6 +2152,7 @@ def run_field_campaign(
                     family.gap_mm,
                     diagnostic_points,
                     options.space_charge,
+                    options.penning,
                     generate_diagnostics=generate_fit_diagnostics,
                     fit_gain_min=fit_gain_min,
                     fit_gain_max=fit_gain_max,
@@ -2172,6 +2203,7 @@ def run_campaign(
     space_charge_override: bool | None = None,
     excitation_positions_override: bool | None = None,
     gas_transport_override: bool | None = None,
+    penning_override: bool | None = None,
     skip_build: bool = False,
 ) -> None:
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -2227,6 +2259,10 @@ def run_campaign(
             if gas_transport_override is None else gas_transport_override
         ),
         magboltz_collisions=int(config.get("magboltz_collisions", 1)),
+        penning=(
+            bool(config.get("penning", False))
+            if penning_override is None else penning_override
+        ),
     )
 
     if scan_mode == "gain" and not 0.0 < tolerance < 1.0:
@@ -2280,7 +2316,7 @@ def run_campaign(
     for mixture in dict.fromkeys(family.mixture for family in families):
         for gap_mm in {family.gap_mm for family in families if family.mixture == mixture}:
             save_alpha_for(
-                mixture, gap_mm, points, options.space_charge,
+                mixture, gap_mm, points, options.space_charge, options.penning,
                 generate_diagnostics=generate_fit_diagnostics,
                 fit_gain_min=fit_gain_min,
                 fit_gain_max=fit_gain_max,
@@ -2295,6 +2331,7 @@ def run_campaign(
         workers=workers,
         tolerance=tolerance,
         space_charge=options.space_charge,
+        penning=options.penning,
         record_excitation_positions=options.record_excitation_positions,
         measure_gas_transport=options.measure_gas_transport,
         magboltz_collisions=options.magboltz_collisions,
@@ -2476,6 +2513,7 @@ def run_campaign(
                     family.gap_mm,
                     points,
                     options.space_charge,
+                    options.penning,
                     generate_diagnostics=generate_fit_diagnostics,
                     fit_gain_min=fit_gain_min,
                     fit_gain_max=fit_gain_max,
@@ -2548,7 +2586,7 @@ def run_gif(args) -> None:
     field_v_cm = args.field_kv_cm * 1000.0 if args.field_kv_cm else None
     if field_v_cm is None:
         fit = read_fit(
-            alpha_path(mixture, args.gap_mm, bool(args.space_charge)),
+            alpha_path(mixture, args.gap_mm, bool(args.space_charge), bool(args.penning)),
             composition,
         )
         if fit is None:
@@ -2597,6 +2635,8 @@ def run_gif(args) -> None:
         "0",
         gas3,
         f"{comp3:.12g}",
+        "1",  # magboltzCollisions (unused unless gas transport is enabled)
+        str(int(bool(args.penning))),
     ]
 
     try:
@@ -2627,6 +2667,12 @@ def parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Enable/disable charged-ring space charge.",
+    )
+    command.add_argument(
+        "--penning",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable/disable Garfield++ Penning transfer.",
     )
     command.add_argument(
         "--excitation-positions",
@@ -2672,6 +2718,7 @@ def main() -> None:
         space_charge_override=args.space_charge,
         excitation_positions_override=args.excitation_positions,
         gas_transport_override=args.gas_transport,
+        penning_override=args.penning,
         skip_build=args.no_build,
     )
 

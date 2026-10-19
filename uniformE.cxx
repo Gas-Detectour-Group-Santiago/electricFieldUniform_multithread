@@ -111,6 +111,7 @@ struct Config {
   double gif_ion_speed_cm_ns = 1.0e-4;
   bool record_excitation_positions = true;
   bool measure_gas_transport = false;
+  bool penning = false;
   int magboltz_collisions = 1;
   int job_id = 0;
   std::string gif_file;
@@ -185,7 +186,7 @@ Config read_config(int argc, char* argv[]) {
         "minNpe maxNpe targetRelativeError gas1 comp1 gas2 comp2 heightFactor "
         "spaceCharge makeGif gifTmax(ns) gifFrames jobId [gifFile] "
         "[gifMoveIons] [gifIonSpeedCmNs] [recordExcitationPositions] "
-        "[measureGasTransport] [gas3] [comp3] [magboltzCollisions]");
+        "[measureGasTransport] [gas3] [comp3] [magboltzCollisions] [penning]");
   }
 
   Config c;
@@ -222,6 +223,9 @@ Config read_config(int argc, char* argv[]) {
   if (argc > 25) c.composition3 = parse_double(argv[25], "composition3");
   if (argc > 26) {
     c.magboltz_collisions = parse_int(argv[26], "magboltzCollisions");
+  }
+  if (argc > 27) {
+    c.penning = parse_int(argv[27], "penning") != 0;
   }
 
   if (c.field_v_cm <= 0.0) throw std::runtime_error("field must be positive");
@@ -944,6 +948,11 @@ int main(int argc, char* argv[]) {
     gas.SetPressure(config.pressure_torr());
     gas.SetMaxElectronEnergy(config.max_electron_energy_ev);
     gas.Initialise();
+    if (config.penning) {
+      gas.EnablePenningTransfer();
+    } else {
+      gas.DisablePenningTransfer();
+    }
 
     GasTransport gas_transport;
     gas_transport.measure(config, gas);
@@ -1227,6 +1236,7 @@ int main(int argc, char* argv[]) {
     gas_data.Branch("gap_mm", &config.gap_mm, "gap_mm/D");
     gas_data.Branch("height_mm", &height_mm, "height_mm/D");
     gas_data.Branch("spaceCharge", &config.space_charge, "spaceCharge/O");
+    gas_data.Branch("penning", &config.penning, "penning/O");
     gas_data.Branch("npe", &actual_npe, "npe/I");
     gas_data.Branch(
         "townsendAlpha_cm_inv", &magboltz_alpha,

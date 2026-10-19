@@ -1,6 +1,6 @@
 scan_mode: field
 measure_gas_transport: false
-record_excitation_positions: true
+record_excitation_positions: false
 space_charge: false
 
 # Four fixed-field simulations per composition:

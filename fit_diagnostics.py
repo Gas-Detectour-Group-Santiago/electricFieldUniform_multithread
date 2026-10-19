@@ -41,9 +41,14 @@ def safe_token(value: str) -> str:
 
 
 def fit_pdf_path(
-    mixture: str, gap_mm: float, composition: str, *, space_charge: bool = False,
+    mixture: str, gap_mm: float, composition: str, *,
+    space_charge: bool = False, penning: bool = False,
 ) -> Path:
-    suffix = "_spacecharge" if space_charge else ""
+    suffix = ""
+    if space_charge:
+        suffix += "_spacecharge"
+    if penning:
+        suffix += "_penning"
     return (
         FITS_ROOT
         / safe_token(mixture)
@@ -60,7 +65,7 @@ def _composition_label(points: list[AlphaPoint], fallback: str) -> str:
         gas = str(item.get("gas", ""))
         fraction = float(item.get("fraction_pct", 0.0))
         display = {
-            "ar": "Ar", "he": "He", "cf4": "CF₄", "n2": "N₂",
+            "ar": "Ar", "he": "He", "xe": "Xe", "cf4": "CF₄", "n2": "N₂",
             "co2": "CO₂", "ch4": "CH₄", "ic4h10": "Iso",
             "c2h2f4": "C₂H₂F₄",
         }.get(gas, gas)
@@ -522,6 +527,7 @@ def generate_family_fit_pdfs(
     points: Iterable[AlphaPoint],
     *,
     space_charge: bool = False,
+    penning: bool = False,
     gain_min: float = 1.0,
     gain_max: float = 1.0e7,
     only_composition: str | None = None,
@@ -541,7 +547,8 @@ def generate_family_fit_pdfs(
             continue
         fit = fit_alpha(composition_points)
         path = fit_pdf_path(
-            mixture, gap_mm, composition, space_charge=space_charge
+            mixture, gap_mm, composition,
+            space_charge=space_charge, penning=penning
         )
         generate_fit_pdf(
             path,
@@ -566,19 +573,26 @@ def regenerate_all() -> int:
 
     points = scan_roots()
     families = sorted({
-        (point.mixture, point.gap_mm, point_flag(point, "space_charge_enabled"))
+        (
+            point.mixture,
+            point.gap_mm,
+            point_flag(point, "space_charge_enabled"),
+            point_flag(point, "penning_enabled"),
+        )
         for point in points
     })
     count = 0
-    for mixture, gap_mm, space_charge in families:
+    for mixture, gap_mm, space_charge, penning in families:
         family_points = [
             point for point in points
             if point.mixture == mixture
             and math.isclose(point.gap_mm, gap_mm, abs_tol=1.0e-10)
             and point_flag(point, "space_charge_enabled") == space_charge
+            and point_flag(point, "penning_enabled") == penning
         ]
         artifacts = generate_family_fit_pdfs(
-            mixture, gap_mm, family_points, space_charge=space_charge
+            mixture, gap_mm, family_points,
+            space_charge=space_charge, penning=penning
         )
         count += len(artifacts)
     return count

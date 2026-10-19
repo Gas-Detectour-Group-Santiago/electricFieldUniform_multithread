@@ -63,6 +63,7 @@ class AlphaPoint:
     components: list[dict[str, float]] = field(default_factory=list)
     n_runs: int = 1
     roots: list[str] = field(default_factory=list)
+    penning_enabled: bool = False
 
     @property
     def field_kv_cm(self) -> float:
@@ -254,6 +255,7 @@ def combine_duplicate_points(
             components=reference.components,
             n_runs=sum(max(1, int(getattr(point, "n_runs", 1))) for point in group),
             roots=roots,
+            penning_enabled=reference.penning_enabled,
         ))
     return combined
 

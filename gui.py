@@ -42,6 +42,7 @@ PYTHON = sys.executable
 
 RUNTIME_OPTION_DEFAULTS = {
     "space_charge": False,
+    "penning": False,
     "record_excitation_positions": True,
     "measure_gas_transport": False,
 }
@@ -105,6 +106,12 @@ class CampaignTab(QWidget):
         self.space_charge.setToolTip(
             "Include charged rings during every primary avalanche. "
             "This changes the gain physics and uses a separate alpha fit."
+        )
+        self.penning = QCheckBox("Penning transfer")
+        self.penning.setToolTip(
+            "Enable Garfield++ Penning transfer using its built-in gas-mixture "
+            "parameterisation when available. This changes the gain physics "
+            "and uses a separate alpha fit."
         )
         self.excitation_positions = QCheckBox("Excitation positions")
         self.excitation_positions.setToolTip(
@@ -171,6 +178,7 @@ class CampaignTab(QWidget):
         options = QHBoxLayout()
         options.addWidget(QLabel("Campaign:"))
         options.addWidget(self.space_charge)
+        options.addWidget(self.penning)
         options.addWidget(self.excitation_positions)
         options.addWidget(self.gas_transport)
         options.addStretch()
@@ -275,6 +283,7 @@ class CampaignTab(QWidget):
         if text is None:
             text = self.editor.toPlainText()
         self.space_charge.setChecked(read_yaml_bool(text, "space_charge", False))
+        self.penning.setChecked(read_yaml_bool(text, "penning", False))
         self.excitation_positions.setChecked(
             read_yaml_bool(text, "record_excitation_positions", True)
         )
@@ -285,6 +294,7 @@ class CampaignTab(QWidget):
     def save_yaml(self):
         text = self.editor.toPlainText()
         text = write_yaml_bool(text, "space_charge", self.space_charge.isChecked())
+        text = write_yaml_bool(text, "penning", self.penning.isChecked())
         text = write_yaml_bool(
             text, "record_excitation_positions", self.excitation_positions.isChecked()
         )

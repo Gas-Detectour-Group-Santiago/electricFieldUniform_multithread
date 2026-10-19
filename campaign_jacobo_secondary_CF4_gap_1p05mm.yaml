@@ -1,0 +1,128 @@
+scan_mode: field
+penning: false
+
+measure_gas_transport: false
+
+record_excitation_positions: false
+
+space_charge: false
+
+# Jacobo 2026 secondary-scintillation campaign
+# Gas family: Ar-CF4
+# Amplification gap: 1.05 mm = 0.105 cm
+# Electric-field conversion: E [kV/cm] = V [V] / 105
+# Each field_set uses the highest measured voltage as reference_field_kv_cm.
+# field_scales are the exact experimental voltage ratios V/Vmax.
+# A 0 V measurement is retained as field_scale: 0.0 to reproduce all measured conditions.
+# X-ray settings encoded in source-folder names: 20 mA, 20 kV.
+
+field_sets:
+
+  # Ar-CF4: concentration scan at 1 bar
+
+  # source_folder: CF4-0.1%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 800, 1000, 1110]
+  # corresponding_fields_kv_cm: [0, 7.619048, 9.52381, 10.571429]
+  - components: {ar: 99.9, cf4: 0.1}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 10.571429
+    field_scales: [0.720721, 0.900901, 1]
+
+  # source_folder: CF4-0.5%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 800, 1000, 1250]
+  # corresponding_fields_kv_cm: [0, 7.619048, 9.52381, 11.904762]
+  - components: {ar: 99.5, cf4: 0.5}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 11.904762
+    field_scales: [0.64, 0.8, 1]
+
+  # source_folder: CF4-1%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 800, 1000, 1300]
+  # corresponding_fields_kv_cm: [0, 7.619048, 9.52381, 12.380952]
+  - components: {ar: 99, cf4: 1}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 12.380952
+    field_scales: [0.615385, 0.769231, 1]
+
+  # source_folder: CF4-2%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 1000, 1250, 1400]
+  # corresponding_fields_kv_cm: [0, 9.52381, 11.904762, 13.333333]
+  - components: {ar: 98, cf4: 2}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 13.333333
+    field_scales: [0.714286, 0.892857, 1]
+
+  # source_folder: CF4-5%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 1000, 1300, 1550]
+  # corresponding_fields_kv_cm: [0, 9.52381, 12.380952, 14.761905]
+  - components: {ar: 95, cf4: 5}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 14.761905
+    field_scales: [0.645161, 0.83871, 1]
+
+  # source_folder: CF4-10%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 1000, 1300, 1650]
+  # corresponding_fields_kv_cm: [0, 9.52381, 12.380952, 15.714286]
+  - components: {ar: 90, cf4: 10}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 15.714286
+    field_scales: [0.606061, 0.787879, 1]
+
+  # source_folder: CF4-20%-1bar-20mA-20kV
+  # measured_voltages_V: [0, 1000, 1400, 1800]
+  # corresponding_fields_kv_cm: [0, 9.52381, 13.333333, 17.142857]
+  - components: {ar: 80, cf4: 20}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 17.142857
+    field_scales: [0.555556, 0.777778, 1]
+
+  # source_folder: CF4-100%-1bar-20ma-20kV
+  # measured_voltages_V: [0, 1000, 2000, 3000]
+  # corresponding_fields_kv_cm: [0, 9.52381, 19.047619, 28.571429]
+  - components: {cf4: 100}
+    pressures_bar: [1]
+    gap_mm: 1.05
+    reference_field_kv_cm: 28.571429
+    field_scales: [0.333333, 0.666667, 1]
+
+  # Ar-CF4: pressure scan at fixed 1% CF4
+
+  # source_folder: CF4-1%-0.5bar-20mA-20kV
+  # measured_voltages_V: [0, 600, 750, 850]
+  # corresponding_fields_kv_cm: [0, 5.714286, 7.142857, 8.095238]
+  - components: {ar: 99, cf4: 1}
+    pressures_bar: [0.5]
+    gap_mm: 1.05
+    reference_field_kv_cm: 8.095238
+    field_scales: [0.705882, 0.882353, 1]
+
+  # source_folder: CF4-1%-2bar-20mA-20kV
+  # measured_voltages_V: [0, 1000, 1600, 1900]
+  # corresponding_fields_kv_cm: [0, 9.52381, 15.238095, 18.095238]
+  - components: {ar: 99, cf4: 1}
+    pressures_bar: [2]
+    gap_mm: 1.05
+    reference_field_kv_cm: 18.095238
+    field_scales: [0.526316, 0.842105, 1]
+
+  # source_folder: CF4-1%-5bar-20mA-20kV
+  # measured_voltages_V: [0, 1000, 2000, 2900]
+  # corresponding_fields_kv_cm: [0, 9.52381, 19.047619, 27.619048]
+  - components: {ar: 99, cf4: 1}
+    pressures_bar: [5]
+    gap_mm: 1.05
+    reference_field_kv_cm: 27.619048
+    field_scales: [0.344828, 0.689655, 1]
+
+# Fixed statistics: every requested field is simulated with exactly 100 primary electrons.
+# Field mode never changes the requested electric field.
+npe: 1000
+
+workers: 2
